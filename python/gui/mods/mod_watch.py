@@ -476,6 +476,10 @@ class _BattleClock(object):
         self._isActive = True
         self._hiddenByUI = False
         self._hiddenByStats = False
+        self._battleOffset = [
+            _readPrefInt(_PREF_BATTLE_X, 550),
+            _readPrefInt(_PREF_BATTLE_Y, 30),
+        ]
         _BattleInjectorView._g_ctrl = self
         _BattleClockView._g_ctrl = self
         self._injectBattleFlash()
@@ -627,6 +631,10 @@ class _GarageClock(object):
         self._injectorView = None
         self._flashReady = False
         self._hangarVisible = False
+        self._garagePosition = [
+            _readPrefInt(_PREF_GARAGE_X, 1350),
+            _readPrefInt(_PREF_GARAGE_Y, 55),
+        ]
         _GarageInjectorView._g_ctrl = self
         try:
             lsm = getLobbyStateMachine()
