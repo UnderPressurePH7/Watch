@@ -461,7 +461,7 @@ class _BattleClock(object):
         self._battleSessionId = 0
         self._tickCallbackId = None
         self._battleOffset = [
-            _readPrefInt(_PREF_BATTLE_X, 350),
+            _readPrefInt(_PREF_BATTLE_X, 550),
             _readPrefInt(_PREF_BATTLE_Y, 30),
         ]
         self._hiddenByUI = False
