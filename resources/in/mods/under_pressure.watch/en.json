@@ -1,0 +1,13 @@
+{
+    "modname": "Watch Clock",
+    "checked": "enabled",
+    "unchecked": "disabled",
+    "defaultValue": "default",
+    "battleEnabled.header": "Show in battle",
+    "battleEnabled.body": "Display clock during battle",
+    "garageEnabled.header": "Show in garage",
+    "garageEnabled.body": "Display clock in garage/hangar",
+    "timeColor.header": "Clock color",
+    "timeColor.body": "Sets the color for the clock text",
+    "days": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+}
