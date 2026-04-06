@@ -351,6 +351,7 @@ class _Config(object):
             pass
 
 
+_loadLocalization()
 g_config = _Config()
 
 
@@ -801,7 +802,6 @@ _g_mod = _WatchMod()
 
 def init():
     try:
-        _loadLocalization()
         _g_mod.init()
     except Exception:
         logger.exception('[Watch] Failed to initialize')
