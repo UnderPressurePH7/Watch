@@ -461,8 +461,8 @@ class _BattleClock(object):
         self._battleSessionId = 0
         self._tickCallbackId = None
         self._battleOffset = [
-            _readPrefInt(_PREF_BATTLE_X, 0),
-            _readPrefInt(_PREF_BATTLE_Y, 0),
+            _readPrefInt(_PREF_BATTLE_X, 350),
+            _readPrefInt(_PREF_BATTLE_Y, 30),
         ]
         self._hiddenByUI = False
         self._hiddenByStats = False
@@ -613,8 +613,8 @@ class _GarageClock(object):
         self._hangarVisible = False
         self._tickCallbackId = None
         self._garagePosition = [
-            _readPrefInt(_PREF_GARAGE_X, 100),
-            _readPrefInt(_PREF_GARAGE_Y, 100),
+            _readPrefInt(_PREF_GARAGE_X, 1350),
+            _readPrefInt(_PREF_GARAGE_Y, 55),
         ]
 
     def enable(self):

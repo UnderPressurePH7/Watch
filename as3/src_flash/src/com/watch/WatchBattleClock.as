@@ -111,8 +111,11 @@ package com.watch
         {
             if (!_initialized || _disposed) return;
             _timeField.htmlText = _fmt(timeStr, _s(FONT_SIZE_TIME), _timeColor);
-            _timeField.x = int((_panelWidth - _timeField.textWidth - 4) / 2);
-            _timeField.y = int((_panelHeight - _timeField.textHeight) / 2) - 1;
+            _panelWidth = int(_timeField.textWidth + 8);
+            _panelHeight = int(_timeField.textHeight + 4);
+            _timeField.x = 0;
+            _timeField.y = 0;
+            _redrawDragHit();
         }
 
         public function as_setVisible(isVisible:Boolean):void
