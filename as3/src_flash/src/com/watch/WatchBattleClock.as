@@ -1,15 +1,9 @@
 package com.watch
 {
     import flash.display.Sprite;
-    import flash.display.Shape;
-    import flash.display.GradientType;
-    import flash.display.SpreadMethod;
-    import flash.display.Graphics;
     import flash.text.TextField;
     import flash.text.TextFieldAutoSize;
     import flash.filters.DropShadowFilter;
-    import flash.filters.GlowFilter;
-    import flash.geom.Matrix;
     import flash.geom.Point;
     import flash.events.MouseEvent;
     import flash.utils.clearTimeout;
@@ -20,26 +14,17 @@ package com.watch
     {
         private static const PANEL_WIDTH:int = 160;
         private static const PANEL_HEIGHT:int = 38;
-        private static const PAD_H:int = 10;
-        private static const PAD_V:int = 8;
 
         private static const FONT_FACE:String = "$FieldFont";
         private static const FONT_SIZE_TIME:int = 24;
-
-        private static const BG_COLOR_TOP:uint = 0x1e1e1e;
-        private static const BG_COLOR_BOT:uint = 0x111111;
-        private static const BG_ALPHA_TOP:Number = 0.67;
-        private static const BG_ALPHA_BOT:Number = 0.73;
 
         private static const BOUNDARY_GAP:int = 5;
         private static const DRAG_DELAY:int = 150;
         private static const DRAG_THRESHOLD:int = 20;
 
-        private var _background:Shape;
         private var _dragHit:Sprite;
         private var _timeField:TextField;
         private var _textShadow:DropShadowFilter;
-        private var _matrix:Matrix;
         private var _clickPoint:Point;
         private var _clickOffset:Point;
         private var _reusablePoint:Point;
@@ -65,16 +50,12 @@ package com.watch
             _clickPoint = new Point();
             _clickOffset = new Point();
             _reusablePoint = new Point();
-            _matrix = new Matrix();
             _textShadow = new DropShadowFilter(1, 45, 0x000000, 0.8, 2, 2, 1.2, 1);
         }
 
         override protected function onPopulate():void
         {
             super.onPopulate();
-            _background = new Shape();
-            _background.filters = [new GlowFilter(0x000000, 0.4, 6, 6, 1, 1)];
-            addChild(_background);
 
             _timeField = _mkTf();
             addChild(_timeField);
@@ -82,7 +63,6 @@ package com.watch
             _createDragHit();
             _initialized = true;
             visible = false;
-            _drawBackground();
             _setupDragListeners();
         }
 
@@ -92,10 +72,8 @@ package com.watch
             _disposed = true;
             _performFullCleanup();
             _killTf(_timeField); _timeField = null;
-            if (_background) { _background.graphics.clear(); if (contains(_background)) removeChild(_background); _background = null; }
             if (_dragHit) { _dragHit.graphics.clear(); if (contains(_dragHit)) removeChild(_dragHit); _dragHit = null; }
             _textShadow = null;
-            _matrix = null;
             _clickPoint = null;
             _clickOffset = null;
             _reusablePoint = null;
@@ -160,7 +138,6 @@ package com.watch
             _scaleFactor = factor;
             _panelWidth = int(PANEL_WIDTH * _scaleFactor);
             _panelHeight = int(PANEL_HEIGHT * _scaleFactor);
-            _drawBackground();
             _redrawDragHit();
             _syncPosition();
         }
@@ -169,21 +146,6 @@ package com.watch
         {
             if (_disposed) return;
             _timeColor = color;
-        }
-
-        private function _drawBackground():void
-        {
-            if (!_background || _disposed) return;
-            var g:Graphics = _background.graphics;
-            g.clear();
-            _matrix.identity();
-            _matrix.createGradientBox(_panelWidth, _panelHeight, Math.PI / 2, 0, 0);
-            g.beginGradientFill(GradientType.LINEAR,
-                [BG_COLOR_TOP, BG_COLOR_BOT],
-                [BG_ALPHA_TOP, BG_ALPHA_BOT],
-                [0, 255], _matrix, SpreadMethod.PAD);
-            g.drawRect(0, 0, _panelWidth, _panelHeight);
-            g.endFill();
         }
 
         private function _s(val:int):int
