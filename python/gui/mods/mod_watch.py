@@ -476,10 +476,6 @@ class _BattleClock(object):
         self._isActive = True
         self._hiddenByUI = False
         self._hiddenByStats = False
-        self._battleOffset = [
-            _readPrefInt(_PREF_BATTLE_X, 550),
-            _readPrefInt(_PREF_BATTLE_Y, 30),
-        ]
         _BattleInjectorView._g_ctrl = self
         _BattleClockView._g_ctrl = self
         self._injectBattleFlash()
@@ -617,6 +613,7 @@ class _GarageClock(object):
         self._enabled = False
         self._hangarVisible = False
         self._tickCallbackId = None
+        self._garageSessionId = 0
         self._garagePosition = [
             _readPrefInt(_PREF_GARAGE_X, 1350),
             _readPrefInt(_PREF_GARAGE_Y, 55),
@@ -628,13 +625,10 @@ class _GarageClock(object):
         if not g_configParams.enabled.value or not g_configParams.garageEnabled.value:
             return
         self._enabled = True
+        self._garageSessionId += 1
         self._injectorView = None
         self._flashReady = False
         self._hangarVisible = False
-        self._garagePosition = [
-            _readPrefInt(_PREF_GARAGE_X, 1350),
-            _readPrefInt(_PREF_GARAGE_Y, 55),
-        ]
         _GarageInjectorView._g_ctrl = self
         try:
             lsm = getLobbyStateMachine()
@@ -655,6 +649,7 @@ class _GarageClock(object):
         if not self._enabled:
             return
         self._enabled = False
+        self._garageSessionId += 1
         self._stopTicker()
         try:
             g_config.onConfigChanged -= self._onConfigChanged
@@ -701,8 +696,10 @@ class _GarageClock(object):
         if self._flashReady and self._injectorView:
             self._injectorView.flashObject.as_setVisible(self._hangarVisible)
 
-    def _injectFlash(self, attempt=0):
-        if not self._enabled:
+    def _injectFlash(self, attempt=0, sessionId=None):
+        if sessionId is None:
+            sessionId = self._garageSessionId
+        if not self._enabled or sessionId != self._garageSessionId:
             return
         try:
             app = ServicesLocator.appLoader.getDefLobbyApp()
@@ -712,7 +709,7 @@ class _GarageClock(object):
         except Exception:
             pass
         if attempt < 30:
-            BigWorld.callback(0.5, lambda: self._injectFlash(attempt + 1))
+            BigWorld.callback(0.5, lambda: self._injectFlash(attempt + 1, sessionId))
 
     def _onGarageInjectorReady(self, view):
         self._injectorView = view

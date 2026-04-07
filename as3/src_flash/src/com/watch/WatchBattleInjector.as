@@ -11,10 +11,9 @@ package com.watch
         private static const COMPONENT_NAME:String = "WatchBattleClockMain";
         private static const MAX_RETRIES:int = 60;
 
-        private static var _activeComponent:WatchBattleClock = null;
-
         public var py_onDragEnd:Function = null;
 
+        private var _activeComponent:WatchBattleClock = null;
         private var _retryCount:int = 0;
 
         public function WatchBattleInjector()
