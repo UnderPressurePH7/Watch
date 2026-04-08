@@ -6,7 +6,6 @@ import weakref
 
 import BigWorld
 import Event
-import Settings
 from PlayerEvents import g_playerEvents
 from gui.Scaleform.framework import g_entitiesFactories, ScopeTemplates, ViewSettings
 from gui.Scaleform.framework.entities.BaseDAAPIComponent import BaseDAAPIComponent
@@ -33,11 +32,8 @@ __author__ = 'Under_Pressure'
 WATCH_CONFIG_DIR = os.path.join('mods', 'configs', 'watch')
 _CONFIG_PATH = os.path.join(WATCH_CONFIG_DIR, 'watch.json')
 
-_PREFS_SECTION = 'watchOverlay'
-_PREF_GARAGE_X = 'garageX'
-_PREF_GARAGE_Y = 'garageY'
-_PREF_BATTLE_X = 'battleOffX'
-_PREF_BATTLE_Y = 'battleOffY'
+_DEFAULT_BATTLE_OFFSET = [550, 30]
+_DEFAULT_GARAGE_OFFSET = [1350, 55]
 
 _BATTLE_INJECTOR_LINKAGE = 'WatchBattleInjector'
 _BATTLE_COMPONENT_LINKAGE = 'WatchBattleClockMain'
@@ -118,45 +114,6 @@ def _tr(key, default=u''):
     return _l10n.get(key, default)
 
 
-def _getPrefsSection(create=False):
-    settings = Settings.g_instance
-    if settings is None:
-        return None
-    prefs = getattr(settings, 'userPrefs', None)
-    if prefs is None:
-        return None
-    try:
-        if not prefs.has_key(_PREFS_SECTION):
-            if not create:
-                return None
-            prefs.createSection(_PREFS_SECTION)
-        return prefs[_PREFS_SECTION]
-    except Exception:
-        return None
-
-
-def _readPrefInt(key, default):
-    section = _getPrefsSection(False)
-    if section is None:
-        return default
-    try:
-        return int(section.readInt(key, default))
-    except Exception:
-        return default
-
-
-def _writePrefInt(key, value):
-    section = _getPrefsSection(True)
-    if section is None:
-        return
-    try:
-        section.writeInt(key, int(value))
-        if Settings.g_instance is not None:
-            Settings.g_instance.save()
-    except Exception:
-        pass
-
-
 def _toBool(value):
     if isinstance(value, bool):
         return value
@@ -171,6 +128,15 @@ def _toColorList(value):
     if isinstance(value, (list, tuple)) and len(value) == 3:
         return [_clamp(0, int(c), 255) for c in value]
     return [255, 255, 255]
+
+
+def _toOffsetList(value, default):
+    if isinstance(value, (list, tuple)) and len(value) >= 2:
+        try:
+            return [int(value[0]), int(value[1])]
+        except (TypeError, ValueError):
+            pass
+    return list(default)
 
 
 def _createTooltip(header=None, body=None):
@@ -262,12 +228,28 @@ class _Config(object):
     def __init__(self):
         self.onConfigChanged = Event.Event()
         self._finalized = False
+        self.battleOffset = list(_DEFAULT_BATTLE_OFFSET)
+        self.garageOffset = list(_DEFAULT_GARAGE_OFFSET)
         self._loadConfig()
         self._registerMod()
 
     def fini(self):
         self._finalized = True
         self.onConfigChanged.clear()
+
+    def setBattleOffset(self, offset):
+        new = _toOffsetList(offset, _DEFAULT_BATTLE_OFFSET)
+        if new == self.battleOffset:
+            return
+        self.battleOffset = new
+        self._saveConfig()
+
+    def setGarageOffset(self, offset):
+        new = _toOffsetList(offset, _DEFAULT_GARAGE_OFFSET)
+        if new == self.garageOffset:
+            return
+        self.garageOffset = new
+        self._saveConfig()
 
     def _loadConfig(self):
         try:
@@ -285,6 +267,8 @@ class _Config(object):
                         param.value = _toBool(data[token])
                     elif isinstance(param, _ColorParam):
                         param.value = _toColorList(data[token])
+            self.battleOffset = _toOffsetList(data.get('battle-offset'), _DEFAULT_BATTLE_OFFSET)
+            self.garageOffset = _toOffsetList(data.get('garage-offset'), _DEFAULT_GARAGE_OFFSET)
         except Exception as e:
             logger.error('[Config] Load failed: %s', e)
 
@@ -295,6 +279,8 @@ class _Config(object):
             data = {}
             for token, param in g_configParams.items().items():
                 data[token] = param.value
+            data['battle-offset'] = list(self.battleOffset)
+            data['garage-offset'] = list(self.garageOffset)
             with open(_CONFIG_PATH, 'w') as f:
                 json.dump(data, f, indent=4, ensure_ascii=False)
         except Exception as e:
@@ -461,10 +447,6 @@ class _BattleClock(object):
         self._isActive = False
         self._battleSessionId = 0
         self._tickCallbackId = None
-        self._battleOffset = [
-            _readPrefInt(_PREF_BATTLE_X, 550),
-            _readPrefInt(_PREF_BATTLE_Y, 30),
-        ]
         self._hiddenByUI = False
         self._hiddenByStats = False
         self._guiEventsBound = False
@@ -516,7 +498,7 @@ class _BattleClock(object):
     def _onBattleFlashReady(self, view):
         self._componentView = view
         self._flashReady = True
-        self._componentView.as_setPosition(self._battleOffset)
+        self._componentView.as_setPosition(g_config.battleOffset)
         self._componentView.as_setColor(g_configParams.timeColor.getPackedColor())
         self._componentView.as_setVisible(True)
         self._pushTime()
@@ -577,12 +559,7 @@ class _BattleClock(object):
         self._componentView.as_setVisible(not self._hiddenByUI and not self._hiddenByStats)
 
     def _onBattleDragEnd(self, offset):
-        try:
-            self._battleOffset = [int(offset[0]), int(offset[1])]
-            _writePrefInt(_PREF_BATTLE_X, self._battleOffset[0])
-            _writePrefInt(_PREF_BATTLE_Y, self._battleOffset[1])
-        except Exception:
-            pass
+        g_config.setBattleOffset(offset)
 
     def _startTicker(self):
         self._stopTicker()
@@ -614,10 +591,6 @@ class _GarageClock(object):
         self._hangarVisible = False
         self._tickCallbackId = None
         self._garageSessionId = 0
-        self._garagePosition = [
-            _readPrefInt(_PREF_GARAGE_X, 1350),
-            _readPrefInt(_PREF_GARAGE_Y, 55),
-        ]
 
     def enable(self):
         if self._enabled:
@@ -722,19 +695,14 @@ class _GarageClock(object):
     def _onGaragePanelReady(self):
         self._flashReady = True
         if self._injectorView:
-            self._injectorView.flashObject.as_setPosition(self._garagePosition)
+            self._injectorView.flashObject.as_setPosition(g_config.garageOffset)
             self._injectorView.flashObject.as_setColor(g_configParams.timeColor.getPackedColor())
             self._injectorView.flashObject.as_setVisible(self._hangarVisible)
         self._pushTime()
         self._startTicker()
 
     def _onGarageDragEnd(self, offset):
-        try:
-            self._garagePosition = [int(offset[0]), int(offset[1])]
-            _writePrefInt(_PREF_GARAGE_X, self._garagePosition[0])
-            _writePrefInt(_PREF_GARAGE_Y, self._garagePosition[1])
-        except Exception:
-            pass
+        g_config.setGarageOffset(offset)
 
     def _startTicker(self):
         self._stopTicker()
