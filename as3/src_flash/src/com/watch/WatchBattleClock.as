@@ -315,7 +315,7 @@ package com.watch
                 _offset[1] = int(y - _reusablePoint.y);
                 _syncPosition();
                 App.cursor.forceSetCursor(Cursors.DRAG_OPEN);
-                updatePosition(_offset);
+                dispatchEvent(new WatchPanelEvent(WatchPanelEvent.OFFSET_CHANGED, _offset));
             }
             _isDragTest = false;
             _isDragging = false;

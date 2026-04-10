@@ -354,6 +354,10 @@ class _BattleInjectorView(View):
             _BattleInjectorView._g_ctrl._onBattleInjectorDisposed()
         super(_BattleInjectorView, self)._dispose()
 
+    def py_onDragEnd(self, offset):
+        g_config.setBattleOffset([int(offset[0]), int(offset[1])])
+
+
 class _BattleClockView(BaseDAAPIComponent):
     _g_ctrl = None
 
@@ -387,9 +391,6 @@ class _BattleClockView(BaseDAAPIComponent):
         if self._isDAAPIInited():
             self.flashObject.as_setColor(color)
 
-    def updatePosition(self, offset):
-        g_config.setBattleOffset([int(offset[0]), int(offset[1])])
-
     def updateSettings(self):
         if self._isDAAPIInited():
             self.flashObject.as_setSettings({
@@ -411,7 +412,7 @@ class _GarageInjectorView(View):
             _GarageInjectorView._g_ctrl._onGarageInjectorDisposed()
         super(_GarageInjectorView, self)._dispose()
 
-    def updatePosition(self, offset):
+    def py_onDragEnd(self, offset):
         g_config.setGarageOffset([int(offset[0]), int(offset[1])])
 
     def updateSettings(self):

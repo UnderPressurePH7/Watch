@@ -10,6 +10,7 @@ package com.watch
     {
         private var _panel:WatchGarageClock = null;
 
+        public var py_onDragEnd:Function = null;
         public var py_onPanelReady:Function = null;
 
         private var _configDone:Boolean = false;
@@ -78,6 +79,7 @@ package com.watch
             }
             _destroyPanel();
             _pendingCalls = [];
+            py_onDragEnd = null;
             py_onPanelReady = null;
             _configDone = false;
             super.onDispose();
@@ -139,7 +141,8 @@ package com.watch
 
         private function _onOffsetChanged(event:WatchPanelEvent):void
         {
-            updatePosition(event.data);
+            if (py_onDragEnd != null)
+                py_onDragEnd(event.data);
         }
 
         public function as_setSettings(settings:Object):void
