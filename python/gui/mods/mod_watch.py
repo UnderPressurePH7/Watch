@@ -29,7 +29,7 @@ logger.setLevel(logging.DEBUG if os.path.isfile('.debug_mods') else logging.ERRO
 __version__ = '0.0.1'
 __author__ = 'Under_Pressure'
 
-WATCH_CONFIG_DIR = os.path.join('mods', 'configs', 'watch')
+WATCH_CONFIG_DIR = os.path.join('mods', 'configs', 'under_pressure')
 _CONFIG_PATH = os.path.join(WATCH_CONFIG_DIR, 'watch.json')
 
 _DEFAULT_BATTLE_OFFSET = [550, 30]
@@ -354,11 +354,6 @@ class _BattleInjectorView(View):
             _BattleInjectorView._g_ctrl._onBattleInjectorDisposed()
         super(_BattleInjectorView, self)._dispose()
 
-    def py_onDragEnd(self, offset):
-        if _BattleInjectorView._g_ctrl:
-            _BattleInjectorView._g_ctrl._onBattleDragEnd(offset)
-
-
 class _BattleClockView(BaseDAAPIComponent):
     _g_ctrl = None
 
@@ -392,6 +387,16 @@ class _BattleClockView(BaseDAAPIComponent):
         if self._isDAAPIInited():
             self.flashObject.as_setColor(color)
 
+    def updatePosition(self, offset):
+        g_config.setBattleOffset([int(offset[0]), int(offset[1])])
+
+    def updateSettings(self):
+        if self._isDAAPIInited():
+            self.flashObject.as_setSettings({
+                'offset': g_config.battleOffset,
+                'color': g_configParams.timeColor.getPackedColor()
+            })
+
 
 class _GarageInjectorView(View):
     _g_ctrl = None
@@ -406,9 +411,15 @@ class _GarageInjectorView(View):
             _GarageInjectorView._g_ctrl._onGarageInjectorDisposed()
         super(_GarageInjectorView, self)._dispose()
 
-    def py_onDragEnd(self, offset):
-        if _GarageInjectorView._g_ctrl:
-            _GarageInjectorView._g_ctrl._onGarageDragEnd(offset)
+    def updatePosition(self, offset):
+        g_config.setGarageOffset([int(offset[0]), int(offset[1])])
+
+    def updateSettings(self):
+        if self.flashObject:
+            self.flashObject.as_setSettings({
+                'offset': g_config.garageOffset,
+                'color': g_configParams.timeColor.getPackedColor()
+            })
 
     def py_onPanelReady(self):
         if _GarageInjectorView._g_ctrl:
@@ -498,8 +509,7 @@ class _BattleClock(object):
     def _onBattleFlashReady(self, view):
         self._componentView = view
         self._flashReady = True
-        self._componentView.as_setPosition(g_config.battleOffset)
-        self._componentView.as_setColor(g_configParams.timeColor.getPackedColor())
+        self._componentView.updateSettings()
         self._componentView.as_setVisible(True)
         self._pushTime()
         self._startTicker()
@@ -515,7 +525,7 @@ class _BattleClock(object):
 
     def _onConfigChanged(self):
         if self._flashReady and self._componentView:
-            self._componentView.as_setColor(g_configParams.timeColor.getPackedColor())
+            self._componentView.updateSettings()
 
     def _bindGUIEvents(self):
         if self._guiEventsBound:
@@ -557,9 +567,6 @@ class _BattleClock(object):
         if not self._flashReady or not self._componentView:
             return
         self._componentView.as_setVisible(not self._hiddenByUI and not self._hiddenByStats)
-
-    def _onBattleDragEnd(self, offset):
-        g_config.setBattleOffset(offset)
 
     def _startTicker(self):
         self._stopTicker()
@@ -648,7 +655,7 @@ class _GarageClock(object):
                 self._injectorView.flashObject.as_setVisible(False)
             return
         if self._flashReady and self._injectorView:
-            self._injectorView.flashObject.as_setColor(g_configParams.timeColor.getPackedColor())
+            self._injectorView.updateSettings()
             self._injectorView.flashObject.as_setVisible(self._hangarVisible)
 
     def _onVisibleRouteChanged(self, routeInfo):
@@ -695,14 +702,10 @@ class _GarageClock(object):
     def _onGaragePanelReady(self):
         self._flashReady = True
         if self._injectorView:
-            self._injectorView.flashObject.as_setPosition(g_config.garageOffset)
-            self._injectorView.flashObject.as_setColor(g_configParams.timeColor.getPackedColor())
+            self._injectorView.updateSettings()
             self._injectorView.flashObject.as_setVisible(self._hangarVisible)
         self._pushTime()
         self._startTicker()
-
-    def _onGarageDragEnd(self, offset):
-        g_config.setGarageOffset(offset)
 
     def _startTicker(self):
         self._stopTicker()

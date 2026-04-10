@@ -151,6 +151,15 @@ package com.watch
             _timeColor = color;
         }
 
+        public function as_setSettings(settings:Object):void
+        {
+            if (!_initialized || _disposed) return;
+            if (settings.hasOwnProperty("offset"))
+                as_setPosition(settings.offset as Array);
+            if (settings.hasOwnProperty("color"))
+                as_setColor(uint(settings.color));
+        }
+
         private function _s(val:int):int
         {
             return int(val * _scaleFactor);
@@ -306,7 +315,7 @@ package com.watch
                 _offset[1] = int(y - _reusablePoint.y);
                 _syncPosition();
                 App.cursor.forceSetCursor(Cursors.DRAG_OPEN);
-                dispatchEvent(new WatchPanelEvent(WatchPanelEvent.OFFSET_CHANGED, _offset));
+                updatePosition(_offset);
             }
             _isDragTest = false;
             _isDragging = false;

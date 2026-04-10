@@ -11,8 +11,6 @@ package com.watch
         private static const COMPONENT_NAME:String = "WatchBattleClockMain";
         private static const MAX_RETRIES:int = 60;
 
-        public var py_onDragEnd:Function = null;
-
         private var _activeComponent:WatchBattleClock = null;
         private var _retryCount:int = 0;
 
@@ -61,7 +59,6 @@ package com.watch
             comp.componentName = COMPONENT_NAME;
             comp.battlePage = page;
             comp.initBattle();
-            comp.addEventListener(WatchPanelEvent.OFFSET_CHANGED, _onOffsetChanged);
             _activeComponent = comp;
 
             mainViewContainer.setFocusedView(mainViewContainer.getTopmostView());
@@ -77,7 +74,6 @@ package com.watch
         {
             removeEventListener(Event.ENTER_FRAME, _onRetryFrame);
             _destroyComponent();
-            py_onDragEnd = null;
             super.onDispose();
         }
 
@@ -85,17 +81,8 @@ package com.watch
         {
             if (_activeComponent)
             {
-                _activeComponent.removeEventListener(WatchPanelEvent.OFFSET_CHANGED, _onOffsetChanged);
                 _activeComponent.cleanup();
                 _activeComponent = null;
-            }
-        }
-
-        private function _onOffsetChanged(event:WatchPanelEvent):void
-        {
-            if (py_onDragEnd != null)
-            {
-                py_onDragEnd(event.data);
             }
         }
     }

@@ -10,7 +10,6 @@ package com.watch
     {
         private var _panel:WatchGarageClock = null;
 
-        public var py_onDragEnd:Function = null;
         public var py_onPanelReady:Function = null;
 
         private var _configDone:Boolean = false;
@@ -79,7 +78,6 @@ package com.watch
             }
             _destroyPanel();
             _pendingCalls = [];
-            py_onDragEnd = null;
             py_onPanelReady = null;
             _configDone = false;
             super.onDispose();
@@ -141,8 +139,23 @@ package com.watch
 
         private function _onOffsetChanged(event:WatchPanelEvent):void
         {
-            if (py_onDragEnd != null)
-                py_onDragEnd(event.data);
+            updatePosition(event.data);
+        }
+
+        public function as_setSettings(settings:Object):void
+        {
+            if (!_configDone)
+            {
+                _pendingCalls.push({fn: this.as_setSettings, args: [settings]});
+                return;
+            }
+            if (_panel)
+            {
+                if (settings.hasOwnProperty("offset"))
+                    _panel.setPositionOffset(settings.offset as Array);
+                if (settings.hasOwnProperty("color"))
+                    _panel.setTimeColor(uint(settings.color));
+            }
         }
 
         public function as_updateTime(timeStr:String, dateStr:String):void
