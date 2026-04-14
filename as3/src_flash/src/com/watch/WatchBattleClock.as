@@ -65,6 +65,9 @@ package com.watch
             _initialized = true;
             visible = false;
             _setupDragListeners();
+
+            if (_lastTimeStr.length > 0) _renderTime();
+            _syncPosition();
         }
 
         override protected function onDispose():void
@@ -110,20 +113,22 @@ package com.watch
 
         public function as_updateTime(timeStr:String):void
         {
-            if (!_initialized || _disposed) return;
+            if (_disposed) return;
             _lastTimeStr = timeStr;
-            _renderTime();
+            if (_initialized) _renderTime();
         }
 
         private function _renderTime():void
         {
             if (!_initialized || _disposed || _timeField == null) return;
             _timeField.htmlText = _fmt(_lastTimeStr, _s(FONT_SIZE_TIME), _timeColor);
+            var oldWidth:int = _panelWidth;
             _panelWidth = int(_timeField.textWidth + 8);
             _panelHeight = int(_timeField.textHeight + 4);
             _timeField.x = 0;
             _timeField.y = 0;
             _redrawDragHit();
+            if (oldWidth != _panelWidth) _syncPosition();
         }
 
         public function as_setVisible(isVisible:Boolean):void
@@ -134,19 +139,20 @@ package com.watch
 
         public function as_setPosition(offset:Array):void
         {
-            if (!_initialized || _disposed) return;
+            if (_disposed) return;
             if (offset && offset.length >= 2)
             {
                 _offset[0] = int(offset[0]);
                 _offset[1] = int(offset[1]);
             }
-            _syncPosition();
+            if (_initialized) _syncPosition();
         }
 
         public function as_setScale(factor:Number):void
         {
-            if (!_initialized || _disposed) return;
+            if (_disposed) return;
             _scaleFactor = factor;
+            if (!_initialized) return;
             _panelWidth = int(PANEL_WIDTH * _scaleFactor);
             _panelHeight = int(PANEL_HEIGHT * _scaleFactor);
             _redrawDragHit();
@@ -163,7 +169,7 @@ package com.watch
 
         public function as_setSettings(settings:Object):void
         {
-            if (!_initialized || _disposed) return;
+            if (_disposed) return;
             if (settings.hasOwnProperty("offset"))
                 as_setPosition(settings.offset as Array);
             if (settings.hasOwnProperty("color"))
