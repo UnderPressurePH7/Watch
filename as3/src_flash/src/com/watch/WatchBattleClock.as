@@ -41,6 +41,7 @@ package com.watch
         private var _initialized:Boolean = false;
         private var _disposed:Boolean = false;
         private var _cleanedUp:Boolean = false;
+        private var _lastTimeStr:String = "";
 
         public function WatchBattleClock()
         {
@@ -110,7 +111,14 @@ package com.watch
         public function as_updateTime(timeStr:String):void
         {
             if (!_initialized || _disposed) return;
-            _timeField.htmlText = _fmt(timeStr, _s(FONT_SIZE_TIME), _timeColor);
+            _lastTimeStr = timeStr;
+            _renderTime();
+        }
+
+        private function _renderTime():void
+        {
+            if (!_initialized || _disposed || _timeField == null) return;
+            _timeField.htmlText = _fmt(_lastTimeStr, _s(FONT_SIZE_TIME), _timeColor);
             _panelWidth = int(_timeField.textWidth + 8);
             _panelHeight = int(_timeField.textHeight + 4);
             _timeField.x = 0;
@@ -148,7 +156,9 @@ package com.watch
         public function as_setColor(color:uint):void
         {
             if (_disposed) return;
+            if (_timeColor == color) return;
             _timeColor = color;
+            if (_lastTimeStr.length > 0) _renderTime();
         }
 
         public function as_setSettings(settings:Object):void

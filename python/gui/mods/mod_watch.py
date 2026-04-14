@@ -228,6 +228,7 @@ class _Config(object):
     def __init__(self):
         self.onConfigChanged = Event.Event()
         self._finalized = False
+        self._dirty = False
         self.battleOffset = list(_DEFAULT_BATTLE_OFFSET)
         self.garageOffset = list(_DEFAULT_GARAGE_OFFSET)
         self._loadConfig()
@@ -237,11 +238,16 @@ class _Config(object):
         self._finalized = True
         self.onConfigChanged.clear()
 
-    def setBattleOffset(self, offset):
+    def updateBattleOffset(self, offset):
         new = _toOffsetList(offset, _DEFAULT_BATTLE_OFFSET)
         if new == self.battleOffset:
             return
         self.battleOffset = new
+        self._dirty = True
+
+    def save(self):
+        if not self._dirty:
+            return
         self._saveConfig()
 
     def setGarageOffset(self, offset):
@@ -283,6 +289,7 @@ class _Config(object):
             data['garage-offset'] = list(self.garageOffset)
             with open(_CONFIG_PATH, 'w') as f:
                 json.dump(data, f, indent=4, ensure_ascii=False)
+            self._dirty = False
         except Exception as e:
             logger.error('[Config] Save failed: %s', e)
 
@@ -380,22 +387,10 @@ class _BattleClockView(BaseDAAPIComponent):
         if self._isDAAPIInited():
             self.flashObject.as_setVisible(isVisible)
 
-    def as_setPosition(self, offset):
-        if self._isDAAPIInited():
-            self.flashObject.as_setPosition(offset)
-
-    def as_setScale(self, factor):
-        if self._isDAAPIInited():
-            self.flashObject.as_setScale(factor)
-
-    def as_setColor(self, color):
-        if self._isDAAPIInited():
-            self.flashObject.as_setColor(color)
-
-    def updateSettings(self, offset):
+    def updateSettings(self):
         if self._isDAAPIInited():
             self.flashObject.as_setSettings({
-                'offset': offset,
+                'offset': g_config.battleOffset,
                 'color': g_configParams.timeColor.getPackedColor()
             })
 
@@ -463,8 +458,6 @@ class _BattleClock(object):
         self._hiddenByUI = False
         self._hiddenByStats = False
         self._guiEventsBound = False
-        self._offset = list(_DEFAULT_BATTLE_OFFSET)
-        self._positionChanged = False
 
     def onAvatarReady(self):
         if not g_configParams.enabled.value or not g_configParams.battleEnabled.value:
@@ -473,15 +466,13 @@ class _BattleClock(object):
         self._isActive = True
         self._hiddenByUI = False
         self._hiddenByStats = False
-        self._offset = list(g_config.battleOffset)
-        self._positionChanged = False
         _BattleInjectorView._g_ctrl = self
         _BattleClockView._g_ctrl = self
         self._injectBattleFlash()
         self._bindGUIEvents()
 
     def onAvatarGone(self):
-        self._savePositionIfChanged()
+        g_config.save()
         self._battleSessionId += 1
         self._isActive = False
         self._unbindGUIEvents()
@@ -516,7 +507,7 @@ class _BattleClock(object):
     def _onBattleFlashReady(self, view):
         self._componentView = view
         self._flashReady = True
-        self._componentView.updateSettings(self._offset)
+        self._componentView.updateSettings()
         self._componentView.as_setVisible(True)
         self._pushTime()
         self._startTicker()
@@ -532,7 +523,7 @@ class _BattleClock(object):
 
     def _onConfigChanged(self):
         if self._flashReady and self._componentView:
-            self._componentView.updateSettings(self._offset)
+            self._componentView.updateSettings()
 
     def _bindGUIEvents(self):
         if self._guiEventsBound:
@@ -597,16 +588,9 @@ class _BattleClock(object):
 
     def _onDragEnd(self, offset):
         try:
-            self._offset = [int(offset[0]), int(offset[1])]
-            self._positionChanged = True
+            g_config.updateBattleOffset([int(offset[0]), int(offset[1])])
         except (TypeError, ValueError, IndexError) as e:
             logger.error('[BattleClock] Error processing drag end: %s', e)
-
-    def _savePositionIfChanged(self):
-        if not self._positionChanged:
-            return
-        g_config.setBattleOffset(self._offset)
-        self._positionChanged = False
 
 
 class _GarageClock(object):
