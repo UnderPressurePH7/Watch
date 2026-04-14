@@ -355,7 +355,8 @@ class _BattleInjectorView(View):
         super(_BattleInjectorView, self)._dispose()
 
     def py_onDragEnd(self, offset):
-        g_config.setBattleOffset([int(offset[0]), int(offset[1])])
+        if _BattleInjectorView._g_ctrl:
+            _BattleInjectorView._g_ctrl._onDragEnd(offset)
 
 
 class _BattleClockView(BaseDAAPIComponent):
@@ -391,10 +392,10 @@ class _BattleClockView(BaseDAAPIComponent):
         if self._isDAAPIInited():
             self.flashObject.as_setColor(color)
 
-    def updateSettings(self):
+    def updateSettings(self, offset):
         if self._isDAAPIInited():
             self.flashObject.as_setSettings({
-                'offset': g_config.battleOffset,
+                'offset': offset,
                 'color': g_configParams.timeColor.getPackedColor()
             })
 
@@ -462,6 +463,8 @@ class _BattleClock(object):
         self._hiddenByUI = False
         self._hiddenByStats = False
         self._guiEventsBound = False
+        self._offset = list(_DEFAULT_BATTLE_OFFSET)
+        self._positionChanged = False
 
     def onAvatarReady(self):
         if not g_configParams.enabled.value or not g_configParams.battleEnabled.value:
@@ -470,12 +473,15 @@ class _BattleClock(object):
         self._isActive = True
         self._hiddenByUI = False
         self._hiddenByStats = False
+        self._offset = list(g_config.battleOffset)
+        self._positionChanged = False
         _BattleInjectorView._g_ctrl = self
         _BattleClockView._g_ctrl = self
         self._injectBattleFlash()
         self._bindGUIEvents()
 
     def onAvatarGone(self):
+        self._savePositionIfChanged()
         self._battleSessionId += 1
         self._isActive = False
         self._unbindGUIEvents()
@@ -510,7 +516,7 @@ class _BattleClock(object):
     def _onBattleFlashReady(self, view):
         self._componentView = view
         self._flashReady = True
-        self._componentView.updateSettings()
+        self._componentView.updateSettings(self._offset)
         self._componentView.as_setVisible(True)
         self._pushTime()
         self._startTicker()
@@ -526,7 +532,7 @@ class _BattleClock(object):
 
     def _onConfigChanged(self):
         if self._flashReady and self._componentView:
-            self._componentView.updateSettings()
+            self._componentView.updateSettings(self._offset)
 
     def _bindGUIEvents(self):
         if self._guiEventsBound:
@@ -588,6 +594,19 @@ class _BattleClock(object):
         if not self._flashReady or not self._componentView:
             return
         self._componentView.as_updateTime(time.strftime('%H:%M:%S'))
+
+    def _onDragEnd(self, offset):
+        try:
+            self._offset = [int(offset[0]), int(offset[1])]
+            self._positionChanged = True
+        except (TypeError, ValueError, IndexError) as e:
+            logger.error('[BattleClock] Error processing drag end: %s', e)
+
+    def _savePositionIfChanged(self):
+        if not self._positionChanged:
+            return
+        g_config.setBattleOffset(self._offset)
+        self._positionChanged = False
 
 
 class _GarageClock(object):
