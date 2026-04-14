@@ -32,8 +32,8 @@ __author__ = 'Under_Pressure'
 WATCH_CONFIG_DIR = os.path.join('mods', 'configs', 'under_pressure')
 _CONFIG_PATH = os.path.join(WATCH_CONFIG_DIR, 'watch.json')
 
-_DEFAULT_BATTLE_OFFSET = [550, 30]
-_DEFAULT_GARAGE_OFFSET = [1350, 55]
+_DEFAULT_BATTLE_OFFSET = [910, 18]
+_DEFAULT_GARAGE_OFFSET = [1652, 58]
 
 _BATTLE_INJECTOR_LINKAGE = 'WatchBattleInjector'
 _BATTLE_COMPONENT_LINKAGE = 'WatchBattleClockMain'
