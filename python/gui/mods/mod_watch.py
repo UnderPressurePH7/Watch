@@ -86,6 +86,31 @@ def _weakCallback(obj, methodName):
     return _cb
 
 
+def _isHangarState(state):
+    if state is None:
+        return False
+    try:
+        from gui.lobby_state_machine.states import isHangarState
+        return bool(isHangarState(state))
+    except Exception:
+        pass
+    try:
+        from gui.impl.lobby.hangar.states import DefaultHangarState
+        lsm = getLobbyStateMachine()
+        if lsm and state == lsm.getStateByCls(DefaultHangarState):
+            return True
+    except Exception:
+        pass
+    try:
+        from comp7.gui.impl.lobby.hangar.states import Comp7HangarState
+        lsm = getLobbyStateMachine()
+        if lsm and state == lsm.getStateByCls(Comp7HangarState):
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def _getLocalizedDayName(weekday):
     days = _l10n.get('days', _DAYS_DEFAULT)
     if not isinstance(days, list) or len(days) != 7:
@@ -618,11 +643,7 @@ class _GarageClock(object):
             lsm = getLobbyStateMachine()
             if lsm:
                 lsm.onVisibleRouteChanged += self._onVisibleRouteChanged
-                try:
-                    from gui.impl.lobby.hangar.states import DefaultHangarState
-                    self._hangarVisible = lsm.getState() == lsm.getStateByCls(DefaultHangarState)
-                except Exception:
-                    self._hangarVisible = True
+                self._hangarVisible = _isHangarState(lsm.getState())
         except Exception:
             self._hangarVisible = True
         if self._hangarVisible:
@@ -664,12 +685,7 @@ class _GarageClock(object):
 
     def _onVisibleRouteChanged(self, routeInfo):
         try:
-            from gui.impl.lobby.hangar.states import DefaultHangarState
-            lsm = getLobbyStateMachine()
-            if lsm:
-                self._hangarVisible = routeInfo.state == lsm.getStateByCls(DefaultHangarState)
-            else:
-                self._hangarVisible = False
+            self._hangarVisible = _isHangarState(routeInfo.state)
         except Exception:
             self._hangarVisible = True
         if self._hangarVisible and not self._flashReady and not self._injectorView:
