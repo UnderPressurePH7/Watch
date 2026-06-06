@@ -3,6 +3,7 @@ package com.watch
     import flash.display.Sprite;
     import flash.text.TextField;
     import flash.text.TextFieldAutoSize;
+    import flash.text.TextFormat;
     import flash.filters.DropShadowFilter;
     import flash.geom.Point;
     import flash.events.MouseEvent;
@@ -24,6 +25,7 @@ package com.watch
 
         private var _dragHit:Sprite;
         private var _timeField:TextField;
+        private var _textFormat:TextFormat;
         private var _textShadow:DropShadowFilter;
         private var _clickPoint:Point;
         private var _clickOffset:Point;
@@ -51,6 +53,7 @@ package com.watch
             _clickPoint = new Point();
             _clickOffset = new Point();
             _reusablePoint = new Point();
+            _textFormat = new TextFormat(FONT_FACE, FONT_SIZE_TIME, _timeColor, true);
             _textShadow = new DropShadowFilter(1, 45, 0x000000, 0.8, 2, 2, 1.2, 1);
         }
 
@@ -77,6 +80,7 @@ package com.watch
             _performFullCleanup();
             _killTf(_timeField); _timeField = null;
             if (_dragHit) { _dragHit.graphics.clear(); if (contains(_dragHit)) removeChild(_dragHit); _dragHit = null; }
+            _textFormat = null;
             _textShadow = null;
             _clickPoint = null;
             _clickOffset = null;
@@ -114,6 +118,8 @@ package com.watch
         public function as_updateTime(timeStr:String):void
         {
             if (_disposed) return;
+            if (timeStr == null) timeStr = "";
+            if (_lastTimeStr == timeStr) return;
             _lastTimeStr = timeStr;
             if (_initialized) _renderTime();
         }
@@ -121,14 +127,21 @@ package com.watch
         private function _renderTime():void
         {
             if (!_initialized || _disposed || _timeField == null) return;
-            _timeField.htmlText = _fmt(_lastTimeStr, _s(FONT_SIZE_TIME), _timeColor);
+            _updateTextFormat();
+            _timeField.defaultTextFormat = _textFormat;
+            _timeField.text = _lastTimeStr;
+            _timeField.setTextFormat(_textFormat);
             var oldWidth:int = _panelWidth;
+            var oldHeight:int = _panelHeight;
             _panelWidth = int(_timeField.textWidth + 8);
             _panelHeight = int(_timeField.textHeight + 4);
             _timeField.x = 0;
             _timeField.y = 0;
-            _redrawDragHit();
-            if (oldWidth != _panelWidth) _syncPosition();
+            if (oldWidth != _panelWidth || oldHeight != _panelHeight)
+            {
+                _redrawDragHit();
+                _syncPosition();
+            }
         }
 
         public function as_setVisible(isVisible:Boolean):void
@@ -153,10 +166,15 @@ package com.watch
             if (_disposed) return;
             _scaleFactor = factor;
             if (!_initialized) return;
-            _panelWidth = int(PANEL_WIDTH * _scaleFactor);
-            _panelHeight = int(PANEL_HEIGHT * _scaleFactor);
-            _redrawDragHit();
-            _syncPosition();
+            if (_lastTimeStr.length > 0)
+                _renderTime();
+            else
+            {
+                _panelWidth = int(PANEL_WIDTH * _scaleFactor);
+                _panelHeight = int(PANEL_HEIGHT * _scaleFactor);
+                _redrawDragHit();
+                _syncPosition();
+            }
         }
 
         public function as_setColor(color:uint):void
@@ -184,6 +202,7 @@ package com.watch
         private function _mkTf():TextField
         {
             var tf:TextField = new TextField();
+            tf.defaultTextFormat = _textFormat;
             tf.selectable = false;
             tf.mouseEnabled = false;
             tf.autoSize = TextFieldAutoSize.LEFT;
@@ -197,20 +216,17 @@ package com.watch
         {
             if (tf == null) return;
             tf.filters = [];
-            tf.htmlText = "";
+            tf.text = "";
             if (contains(tf)) removeChild(tf);
         }
 
-        private function _fmt(text:String, size:int, color:uint):String
+        private function _updateTextFormat():void
         {
-            return '<font face="' + FONT_FACE + '" size="' + size + '" color="' + _hex(color) + '"><b>' + text + '</b></font>';
-        }
-
-        private static function _hex(color:uint):String
-        {
-            var h:String = color.toString(16).toUpperCase();
-            while (h.length < 6) h = "0" + h;
-            return "#" + h;
+            if (_textFormat == null) return;
+            _textFormat.font = FONT_FACE;
+            _textFormat.size = _s(FONT_SIZE_TIME);
+            _textFormat.color = _timeColor;
+            _textFormat.bold = true;
         }
 
         private function _createDragHit():void

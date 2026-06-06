@@ -50,6 +50,22 @@ _l10n = {}
 
 _DAYS_DEFAULT = [u'Monday', u'Tuesday', u'Wednesday', u'Thursday', u'Friday', u'Saturday', u'Sunday']
 
+_HANGAR_STATE_CLASS_PATHS = (
+    'gui.impl.lobby.hangar.states.DefaultHangarState',
+    'gui.impl.lobby.hangar.states.HangarState',
+    'frontline.gui.impl.lobby.states.FrontlineHangarState',
+    'frontline.gui.impl.lobby.states.FrontlineRootHangarState',
+    'comp7.gui.impl.lobby.hangar.states.Comp7HangarState',
+    'comp7.gui.impl.lobby.hangar.states.Comp7RootHangarState',
+    'comp7_light.gui.impl.lobby.hangar.states.Comp7LightHangarState',
+    'comp7_light.gui.impl.lobby.hangar.states.Comp7LightRootHangarState',
+    'fun_random.gui.impl.lobby.hangar.states.FunRandomHangarState',
+    'fun_random.gui.impl.lobby.hangar.states.DefaultFunRandomHangarState',
+    'battle_royale.gui.impl.lobby.views.states.BattleRoyaleHangarState',
+    'last_stand.gui.impl.lobby.states.LastStandHangarState',
+    'last_stand.gui.impl.lobby.states.LastStandRootHangarState',
+)
+
 
 def _byteify(data):
     try:
@@ -87,6 +103,19 @@ def _weakCallback(obj, methodName):
 
 
 def _isHangarState(state):
+    try:
+        from gui.lobby_state_machine.states import isInHangarState
+        if isInHangarState():
+            return True
+    except Exception:
+        pass
+    if state is not None:
+        try:
+            from gui.lobby_state_machine.states import LobbyStateFlags
+            if state.getFlags() & LobbyStateFlags.HANGAR:
+                return True
+        except Exception:
+            pass
     if state is None:
         return False
     try:
@@ -108,7 +137,25 @@ def _isHangarState(state):
             return True
     except Exception:
         pass
+    try:
+        lsm = getLobbyStateMachine()
+        if lsm:
+            for classPath in _HANGAR_STATE_CLASS_PATHS:
+                stateCls = _importClass(classPath)
+                if stateCls is not None and state == lsm.getStateByCls(stateCls):
+                    return True
+    except Exception:
+        pass
     return False
+
+
+def _importClass(classPath):
+    try:
+        moduleName, className = classPath.rsplit('.', 1)
+        module = __import__(moduleName, globals(), locals(), [className])
+        return getattr(module, className, None)
+    except Exception:
+        return None
 
 
 def _getLocalizedDayName(weekday):
@@ -534,7 +581,6 @@ class _BattleClock(object):
         self._flashReady = True
         self._componentView.updateSettings()
         self._componentView.as_setVisible(True)
-        self._pushTime()
         self._startTicker()
         g_config.onConfigChanged += self._onConfigChanged
 
@@ -589,7 +635,13 @@ class _BattleClock(object):
     def _updateVisibility(self):
         if not self._flashReady or not self._componentView:
             return
-        self._componentView.as_setVisible(not self._hiddenByUI and not self._hiddenByStats)
+        isVisible = self._isClockVisible()
+        self._componentView.as_setVisible(isVisible)
+        if isVisible:
+            self._pushTime()
+
+    def _isClockVisible(self):
+        return not self._hiddenByUI and not self._hiddenByStats
 
     def _startTicker(self):
         self._stopTicker()
@@ -608,6 +660,8 @@ class _BattleClock(object):
 
     def _pushTime(self):
         if not self._flashReady or not self._componentView:
+            return
+        if not self._isClockVisible():
             return
         self._componentView.as_updateTime(time.strftime('%H:%M:%S'))
 
