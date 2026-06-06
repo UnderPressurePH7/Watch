@@ -14,7 +14,7 @@ on:
       version:
         description: 'Mod Version'
         required: true
-        default: '0.0.1'
+        default: '0.0.2'
       mod_id:
         description: 'Mod ID (e.g., me.author.modname)'
         required: true
@@ -30,7 +30,7 @@ on:
       game_version:
         description: 'World of Tanks version'
         required: true
-        default: '2.2.0.2'
+        default: '2.3.0.0'
 
 permissions:
   contents: write
@@ -172,8 +172,8 @@ jobs:
             $version = "${{ github.ref_name }}".TrimStart('v')
             $modId = "me.under_pressure.watch"
             $modName = "Watch"
-            $modDescription = "Mod for Strongholds. Displays the ELO rating of the enemy team and yours, ELO gain, as well as win rate and number of battles over the last 28 days."
-            $gameVersion = "2.2.0.2"
+            $modDescription = "Watch"
+            $gameVersion = "2.3.0.0"
         }
         
         echo "PROJECT_VERSION=$version" >> $env:GITHUB_ENV

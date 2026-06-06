@@ -26,7 +26,7 @@ except Exception:
 logger = logging.getLogger('Watch')
 logger.setLevel(logging.DEBUG if os.path.isfile('.debug_mods') else logging.ERROR)
 
-__version__ = '0.0.1'
+__version__ = '0.0.2'
 __author__ = 'Under_Pressure'
 
 WATCH_CONFIG_DIR = os.path.join('mods', 'configs', 'under_pressure')
