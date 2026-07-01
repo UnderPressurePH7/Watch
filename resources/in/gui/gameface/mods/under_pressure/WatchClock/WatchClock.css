@@ -1,0 +1,55 @@
+html, body {
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    background: transparent;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+#watch-root {
+    display: block;
+    width: 100%;
+    height: auto;
+    padding: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    font-family: Arial, "Helvetica Neue", Helvetica, sans-serif;
+    font-weight: bold;
+    font-variant-numeric: tabular-nums;
+    text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.85);
+}
+
+#watch-root.watch-garage {
+    text-align: right;
+}
+
+#watch-root.watch-battle {
+    text-align: right;
+}
+
+#watch-time {
+    color: #FFFFFF;
+    line-height: 1.1;
+}
+
+#watch-date {
+    color: #8899AA;
+    line-height: 1.1;
+}
+
+#watch-root.watch-battle #watch-time {
+    font-size: 24px;
+}
+
+#watch-root.watch-garage #watch-time {
+    font-size: 26px;
+}
+
+#watch-root.watch-garage #watch-date {
+    font-size: 14px;
+}

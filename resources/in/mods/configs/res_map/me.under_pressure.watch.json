@@ -1,0 +1,14 @@
+[
+  {
+    "itemID": "mods/under_pressure/WatchBattle/layoutID",
+    "type": "Layout",
+    "path": "coui://gui/gameface/mods/under_pressure/WatchClock/WatchBattle.html",
+    "parameters": { "extension": "", "entrance": "WatchBattle", "impl": "gameface" }
+  },
+  {
+    "itemID": "mods/under_pressure/WatchGarage/layoutID",
+    "type": "Layout",
+    "path": "coui://gui/gameface/mods/under_pressure/WatchClock/WatchGarage.html",
+    "parameters": { "extension": "", "entrance": "WatchGarage", "impl": "gameface" }
+  }
+]

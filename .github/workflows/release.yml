@@ -8,13 +8,13 @@ on:
     inputs:
       build_swf:
         description: 'Build SWF files'
-        required: true
+        required: false
         type: boolean
-        default: true
+        default: false
       version:
         description: 'Mod Version'
         required: true
-        default: '0.0.2'
+        default: '0.1.0'
       mod_id:
         description: 'Mod ID (e.g., me.author.modname)'
         required: true
@@ -26,11 +26,11 @@ on:
       mod_description:
         description: 'Mod Description'
         required: true
-        default: 'Watch'
+        default: 'A simple watch mod for World of Tanks'
       game_version:
         description: 'World of Tanks version'
         required: true
-        default: '2.3.0.0'
+        default: '2.3.0.1'
 
 permissions:
   contents: write

@@ -1,21 +1,13 @@
 import json
 import logging
 import os
-import time
-import weakref
 
 import BigWorld
 import Event
 from PlayerEvents import g_playerEvents
-from gui.Scaleform.framework import g_entitiesFactories, ScopeTemplates, ViewSettings
-from gui.Scaleform.framework.entities.BaseDAAPIComponent import BaseDAAPIComponent
-from gui.Scaleform.framework.entities.View import View
-from gui.Scaleform.framework.managers.loaders import SFViewLoadParams
-from gui.shared.personality import ServicesLocator
 from gui.shared import g_eventBus, EVENT_BUS_SCOPE
 from gui.shared.events import GameEvent
 from gui.Scaleform.lobby_entry import getLobbyStateMachine
-from frameworks.wulf import WindowLayer
 
 try:
     from helpers import getClientLanguage
@@ -26,21 +18,46 @@ except Exception:
 logger = logging.getLogger('Watch')
 logger.setLevel(logging.DEBUG if os.path.isfile('.debug_mods') else logging.ERROR)
 
-__version__ = '0.0.2'
+__version__ = '0.1.0'
 __author__ = 'Under_Pressure'
+
+_GF_OK = True
+try:
+    import GUI
+    import Keys
+    from openwg_gameface import ModDynAccessor, manager as gamefaceResMap, on_ready as gamefaceOnReady
+    from frameworks.wulf import ViewFlags, ViewModel, ViewSettings, WindowFlags, WindowLayer, WindowStatus
+    from gui.impl.pub import ViewImpl, WindowImpl
+    from helpers import dependency
+    from skeletons.gui.impl import IGuiLoader
+except Exception:
+    _GF_OK = False
+    logger.error('[Watch] openwg_gameface is required. Get it at https://gitlab.com/openwg/wot.gameface', exc_info=True)
+
+try:
+    from gui.Scaleform.daapi.view.battle.shared.page import SharedPage
+except Exception:
+    SharedPage = None
+
+try:
+    from gui.impl.lobby.hangar.states import DefaultHangarState, LegacyHangarState
+except Exception:
+    DefaultHangarState = LegacyHangarState = None
 
 WATCH_CONFIG_DIR = os.path.join('mods', 'configs', 'under_pressure')
 _CONFIG_PATH = os.path.join(WATCH_CONFIG_DIR, 'watch.json')
+_CONFIG_ENCODING_UTF8 = 'utf-8'
+_CONFIG_ENCODING_UTF8_BOM = 'utf-8-bom'
+_UTF8_BOM = '\xef\xbb\xbf'
 
-_DEFAULT_BATTLE_OFFSET = [910, 18]
-_DEFAULT_GARAGE_OFFSET = [1652, 58]
+_DEFAULT_BATTLE_OFFSET = [872, 8]
+_DEFAULT_GARAGE_OFFSET = [1650, 60]
 
-_BATTLE_INJECTOR_LINKAGE = 'WatchBattleInjector'
-_BATTLE_COMPONENT_LINKAGE = 'WatchBattleClockMain'
-_BATTLE_SWF = 'WatchBattle.swf'
+_BATTLE_NAME = 'WatchBattle'
+_GARAGE_NAME = 'WatchGarage'
 
-_GARAGE_INJECTOR_LINKAGE = 'WatchGarageInjector'
-_GARAGE_SWF = 'WatchGarage.swf'
+_BATTLE_SIZE = (112, 30)
+_GARAGE_SIZE = (170, 50)
 
 MOD_LINKAGE = 'me.under_pressure.watch'
 
@@ -52,37 +69,14 @@ _DAYS_DEFAULT = [u'Monday', u'Tuesday', u'Wednesday', u'Thursday', u'Friday', u'
 
 _HANGAR_STATE_CLASS_PATHS = (
     'gui.impl.lobby.hangar.states.DefaultHangarState',
+    'gui.impl.lobby.hangar.states.LegacyHangarState',
     'gui.impl.lobby.hangar.states.HangarState',
-    'frontline.gui.impl.lobby.states.FrontlineHangarState',
-    'frontline.gui.impl.lobby.states.FrontlineRootHangarState',
     'comp7.gui.impl.lobby.hangar.states.Comp7HangarState',
     'comp7.gui.impl.lobby.hangar.states.Comp7RootHangarState',
-    'comp7_light.gui.impl.lobby.hangar.states.Comp7LightHangarState',
-    'comp7_light.gui.impl.lobby.hangar.states.Comp7LightRootHangarState',
     'fun_random.gui.impl.lobby.hangar.states.FunRandomHangarState',
     'fun_random.gui.impl.lobby.hangar.states.DefaultFunRandomHangarState',
     'battle_royale.gui.impl.lobby.views.states.BattleRoyaleHangarState',
-    'last_stand.gui.impl.lobby.states.LastStandHangarState',
-    'last_stand.gui.impl.lobby.states.LastStandRootHangarState',
 )
-
-
-def _byteify(data):
-    try:
-        _unicode = unicode
-    except NameError:
-        _unicode = str
-    if isinstance(data, dict):
-        try:
-            items = data.iteritems()
-        except AttributeError:
-            items = data.items()
-        return {_byteify(key): _byteify(value) for key, value in items}
-    elif isinstance(data, (list, tuple)):
-        return [_byteify(element) for element in data]
-    elif isinstance(data, _unicode):
-        return data.encode('utf-8')
-    return data
 
 
 def _cancelCallbackSafe(cbid):
@@ -93,13 +87,13 @@ def _cancelCallbackSafe(cbid):
         pass
 
 
-def _weakCallback(obj, methodName):
-    ref = weakref.ref(obj)
-    def _cb(*args, **kwargs):
-        inst = ref()
-        if inst is not None:
-            getattr(inst, methodName)(*args, **kwargs)
-    return _cb
+def _importClass(classPath):
+    try:
+        moduleName, className = classPath.rsplit('.', 1)
+        module = __import__(moduleName, globals(), locals(), [className])
+        return getattr(module, className, None)
+    except Exception:
+        return None
 
 
 def _isHangarState(state):
@@ -109,32 +103,17 @@ def _isHangarState(state):
             return True
     except Exception:
         pass
-    if state is not None:
-        try:
-            from gui.lobby_state_machine.states import LobbyStateFlags
-            if state.getFlags() & LobbyStateFlags.HANGAR:
-                return True
-        except Exception:
-            pass
     if state is None:
         return False
     try:
+        from gui.lobby_state_machine.states import LobbyStateFlags
+        if state.getFlags() & LobbyStateFlags.HANGAR:
+            return True
+    except Exception:
+        pass
+    try:
         from gui.lobby_state_machine.states import isHangarState
         return bool(isHangarState(state))
-    except Exception:
-        pass
-    try:
-        from gui.impl.lobby.hangar.states import DefaultHangarState
-        lsm = getLobbyStateMachine()
-        if lsm and state == lsm.getStateByCls(DefaultHangarState):
-            return True
-    except Exception:
-        pass
-    try:
-        from comp7.gui.impl.lobby.hangar.states import Comp7HangarState
-        lsm = getLobbyStateMachine()
-        if lsm and state == lsm.getStateByCls(Comp7HangarState):
-            return True
     except Exception:
         pass
     try:
@@ -149,23 +128,56 @@ def _isHangarState(state):
     return False
 
 
-def _importClass(classPath):
-    try:
-        moduleName, className = classPath.rsplit('.', 1)
-        module = __import__(moduleName, globals(), locals(), [className])
-        return getattr(module, className, None)
-    except Exception:
-        return None
-
-
-def _getLocalizedDayName(weekday):
+def _dayNames():
     days = _l10n.get('days', _DAYS_DEFAULT)
     if not isinstance(days, list) or len(days) != 7:
-        days = _DAYS_DEFAULT
-    if 0 <= weekday < 7:
-        return days[weekday]
-    return u''
+        return list(_DAYS_DEFAULT)
+    return days
 
+
+def _toUnicodeText(value):
+    if isinstance(value, unicode):
+        return value
+    try:
+        return unicode(value, 'utf-8')
+    except Exception:
+        return unicode(value)
+
+
+def _textWidth(text, fontSize):
+    width = 0.0
+    for ch in _toUnicodeText(text):
+        code = ord(ch)
+        if ch == ' ':
+            width += fontSize * 0.30
+        elif ch in u':.,':
+            width += fontSize * 0.26
+        elif ch.isdigit():
+            width += fontSize * 0.56
+        elif code > 127:
+            width += fontSize * 0.58
+        elif ch.isupper():
+            width += fontSize * 0.65
+        else:
+            width += fontSize * 0.52
+    return int(width + 4)
+
+
+def _clockSize(mode):
+    p = g_configParams
+    if p.use24h.value:
+        timeSample = u'88:88:88' if p.showSeconds.value else u'88:88'
+    else:
+        timeSample = u'88:88:88 PM' if p.showSeconds.value else u'88:88 PM'
+    timeFont = 24 if mode == 'battle' else 26
+    timeWidth = _textWidth(timeSample, timeFont)
+    timeHeight = int(timeFont * 1.1 + 4)
+    if mode == 'battle':
+        return (max(1, timeWidth), max(1, timeHeight))
+    dateSample = max([_toUnicodeText(day) + u', 88.88.8888' for day in _dayNames()], key=lambda value: _textWidth(value, 14))
+    dateWidth = _textWidth(dateSample, 14)
+    dateHeight = int(14 * 1.1 + 4)
+    return (max(1, timeWidth, dateWidth), max(1, timeHeight + dateHeight))
 
 def _loadLocalization():
     global _l10n
@@ -175,8 +187,7 @@ def _loadLocalization():
         try:
             section = ResMgr.openSection(path)
             if section is not None:
-                raw = section.asBinary
-                _l10n = json.loads(raw)
+                _l10n = json.loads(section.asBinary)
                 return
         except Exception:
             pass
@@ -189,7 +200,7 @@ def _tr(key, default=u''):
 def _toBool(value):
     if isinstance(value, bool):
         return value
-    return str(value).lower() == "true"
+    return str(value).lower() == 'true'
 
 
 def _clamp(minVal, val, maxVal):
@@ -209,6 +220,46 @@ def _toOffsetList(value, default):
         except (TypeError, ValueError):
             pass
     return list(default)
+
+
+def _loadJsonFile(path):
+    with open(path, 'rb') as f:
+        raw = f.read()
+    encoding = _CONFIG_ENCODING_UTF8
+    if raw.startswith(_UTF8_BOM):
+        raw = raw[len(_UTF8_BOM):]
+        encoding = _CONFIG_ENCODING_UTF8_BOM
+    text = raw.decode('utf-8')
+    text = text.strip()
+    return (json.loads(text) if text else {}, encoding)
+
+
+def _saveJsonFile(path, data, encoding):
+    text = json.dumps(data, indent=4, ensure_ascii=False)
+    if not isinstance(text, unicode):
+        text = text.decode('utf-8')
+    raw = text.encode('utf-8')
+    if encoding == _CONFIG_ENCODING_UTF8_BOM:
+        raw = _UTF8_BOM + raw
+    with open(path, 'wb') as f:
+        f.write(raw)
+
+
+def clampCoordinates(xPos, yPos, size, padX=0, padY=0):
+    screenWidth, screenHeight = GUI.screenResolution()
+    maxX = max(padX, screenWidth - size[0] - padX)
+    maxY = max(padY, screenHeight - size[1] - padY)
+    clampedX = max(padX, min(int(round(xPos)), maxX))
+    clampedY = max(padY, min(int(round(yPos)), maxY))
+    return (clampedX, clampedY)
+
+
+def _cursorPixels(cursor):
+    normX, normY = cursor.position
+    screenWidth, screenHeight = GUI.screenResolution()
+    pixelX = int((normX + 1.0) * 0.5 * screenWidth)
+    pixelY = int((1.0 - normY) * 0.5 * screenHeight)
+    return (pixelX, pixelY)
 
 
 def _createTooltip(header=None, body=None):
@@ -236,11 +287,11 @@ class _CheckboxParam(object):
 
     def renderParam(self, header, body=None):
         return {
-            "type": "CheckBox",
-            "text": header,
-            "varName": self.tokenName,
-            "value": self.value,
-            "tooltip": _createTooltip(header, body)
+            'type': 'CheckBox',
+            'text': header,
+            'varName': self.tokenName,
+            'value': self.value,
+            'tooltip': _createTooltip(header, body)
         }
 
 
@@ -253,7 +304,7 @@ class _ColorParam(object):
     @property
     def msaValue(self):
         c = self.value
-        return "%02X%02X%02X" % (int(c[0]), int(c[1]), int(c[2]))
+        return '%02X%02X%02X' % (int(c[0]), int(c[1]), int(c[2]))
 
     @msaValue.setter
     def msaValue(self, v):
@@ -261,19 +312,15 @@ class _ColorParam(object):
             self.value = _toColorList(v)
         else:
             h = str(v).lstrip('#')
-            self.value = [int(h[i:i+2], 16) for i in (0, 2, 4)]
-
-    def getPackedColor(self):
-        c = self.value
-        return (int(c[0]) << 16) | (int(c[1]) << 8) | int(c[2])
+            self.value = [int(h[i:i + 2], 16) for i in (0, 2, 4)]
 
     def renderParam(self, header, body=None):
         return {
-            "type": "ColorChoice",
-            "text": header,
-            "varName": self.tokenName,
-            "value": self.msaValue,
-            "tooltip": _createTooltip(header, body)
+            'type': 'ColorChoice',
+            'text': header,
+            'varName': self.tokenName,
+            'value': self.msaValue,
+            'tooltip': _createTooltip(header, body)
         }
 
 
@@ -283,6 +330,8 @@ class _ConfigParams(object):
         self.battleEnabled = _CheckboxParam('battle-enabled', True)
         self.garageEnabled = _CheckboxParam('garage-enabled', True)
         self.timeColor = _ColorParam('time-color', [255, 255, 255])
+        self.use24h = _CheckboxParam('use-24h', True)
+        self.showSeconds = _CheckboxParam('show-seconds', True)
 
     def items(self):
         return {
@@ -290,6 +339,8 @@ class _ConfigParams(object):
             self.battleEnabled.tokenName: self.battleEnabled,
             self.garageEnabled.tokenName: self.garageEnabled,
             self.timeColor.tokenName: self.timeColor,
+            self.use24h.tokenName: self.use24h,
+            self.showSeconds.tokenName: self.showSeconds,
         }
 
 
@@ -300,9 +351,9 @@ class _Config(object):
     def __init__(self):
         self.onConfigChanged = Event.Event()
         self._finalized = False
-        self._dirty = False
         self.battleOffset = list(_DEFAULT_BATTLE_OFFSET)
         self.garageOffset = list(_DEFAULT_GARAGE_OFFSET)
+        self._configEncoding = _CONFIG_ENCODING_UTF8
         self._loadConfig()
         self._registerMod()
 
@@ -310,16 +361,11 @@ class _Config(object):
         self._finalized = True
         self.onConfigChanged.clear()
 
-    def updateBattleOffset(self, offset):
+    def setBattleOffset(self, offset):
         new = _toOffsetList(offset, _DEFAULT_BATTLE_OFFSET)
         if new == self.battleOffset:
             return
         self.battleOffset = new
-        self._dirty = True
-
-    def save(self):
-        if not self._dirty:
-            return
         self._saveConfig()
 
     def setGarageOffset(self, offset):
@@ -329,26 +375,40 @@ class _Config(object):
         self.garageOffset = new
         self._saveConfig()
 
+    def _applyData(self, data):
+        missing = False
+        for token, param in g_configParams.items().items():
+            if token in data:
+                if isinstance(param, _CheckboxParam):
+                    param.value = _toBool(data[token])
+                elif isinstance(param, _ColorParam):
+                    param.value = _toColorList(data[token])
+            else:
+                missing = True
+        if 'battle-offset' in data:
+            self.battleOffset = _toOffsetList(data['battle-offset'], _DEFAULT_BATTLE_OFFSET)
+        else:
+            missing = True
+        if 'garage-offset' in data:
+            self.garageOffset = _toOffsetList(data['garage-offset'], _DEFAULT_GARAGE_OFFSET)
+        else:
+            missing = True
+        return missing
+
     def _loadConfig(self):
-        try:
-            if not os.path.exists(WATCH_CONFIG_DIR):
-                os.makedirs(WATCH_CONFIG_DIR)
-            if not os.path.isfile(_CONFIG_PATH):
-                self._saveConfig()
-                return
-            with open(_CONFIG_PATH, 'r') as f:
-                data = _byteify(json.loads(f.read().strip()))
-            params = g_configParams.items()
-            for token, param in params.items():
-                if token in data:
-                    if isinstance(param, _CheckboxParam):
-                        param.value = _toBool(data[token])
-                    elif isinstance(param, _ColorParam):
-                        param.value = _toColorList(data[token])
-            self.battleOffset = _toOffsetList(data.get('battle-offset'), _DEFAULT_BATTLE_OFFSET)
-            self.garageOffset = _toOffsetList(data.get('garage-offset'), _DEFAULT_GARAGE_OFFSET)
-        except Exception as e:
-            logger.error('[Config] Load failed: %s', e)
+        data = {}
+        existed = os.path.isfile(_CONFIG_PATH)
+        if existed:
+            try:
+                data, self._configEncoding = _loadJsonFile(_CONFIG_PATH)
+            except Exception as e:
+                logger.error('[Config] Load failed, restoring defaults: %s', e)
+                data = {}
+                existed = False
+                self._configEncoding = _CONFIG_ENCODING_UTF8
+        repaired = self._applyData(data)
+        if not existed or repaired:
+            self._saveConfig()
 
     def _saveConfig(self):
         try:
@@ -359,9 +419,7 @@ class _Config(object):
                 data[token] = param.value
             data['battle-offset'] = list(self.battleOffset)
             data['garage-offset'] = list(self.garageOffset)
-            with open(_CONFIG_PATH, 'w') as f:
-                json.dump(data, f, indent=4, ensure_ascii=False)
-            self._dirty = False
+            _saveJsonFile(_CONFIG_PATH, data, self._configEncoding)
         except Exception as e:
             logger.error('[Config] Save failed: %s', e)
 
@@ -370,7 +428,6 @@ class _Config(object):
             from gui.modsSettingsApi import g_modsSettingsApi
         except ImportError:
             return
-
         try:
             template = {
                 'modDisplayName': _tr('modname', u'Watch Clock'),
@@ -389,6 +446,14 @@ class _Config(object):
                     g_configParams.timeColor.renderParam(
                         _tr('timeColor.header', u'Clock color'),
                         _tr('timeColor.body', u'Sets the clock text color')
+                    ),
+                    g_configParams.use24h.renderParam(
+                        _tr('use24h.header', u'24-hour format'),
+                        _tr('use24h.body', u'Use 24-hour time instead of AM/PM')
+                    ),
+                    g_configParams.showSeconds.renderParam(
+                        _tr('showSeconds.header', u'Show seconds'),
+                        _tr('showSeconds.body', u'Display seconds in the clock')
                     ),
                 ]
             }
@@ -420,186 +485,367 @@ _loadLocalization()
 g_config = _Config()
 
 
-class _BattleInjectorView(View):
-    _g_ctrl = None
-
-    def _populate(self):
-        super(_BattleInjectorView, self)._populate()
-        if _BattleInjectorView._g_ctrl:
-            _BattleInjectorView._g_ctrl._onBattleInjectorReady(self)
-
-    def _dispose(self):
-        if _BattleInjectorView._g_ctrl:
-            _BattleInjectorView._g_ctrl._onBattleInjectorDisposed()
-        super(_BattleInjectorView, self)._dispose()
-
-    def py_onDragEnd(self, offset):
-        if _BattleInjectorView._g_ctrl:
-            _BattleInjectorView._g_ctrl._onDragEnd(offset)
+def _buildPayload(mode, size, visible):
+    p = g_configParams
+    return json.dumps({
+        'mode': mode,
+        'visible': bool(visible),
+        'color': p.timeColor.msaValue,
+        'format': '24' if p.use24h.value else '12',
+        'showSeconds': bool(p.showSeconds.value),
+        'days': _dayNames(),
+        'w': size[0],
+        'h': size[1],
+    }, ensure_ascii=False)
 
 
-class _BattleClockView(BaseDAAPIComponent):
-    _g_ctrl = None
+if _GF_OK:
 
-    def _populate(self):
-        super(_BattleClockView, self)._populate()
-        if _BattleClockView._g_ctrl:
-            _BattleClockView._g_ctrl._onBattleFlashReady(self)
+    class _ClockModel(ViewModel):
+        def __init__(self, payload):
+            self._payload = payload
+            super(_ClockModel, self).__init__(properties=1, commands=1)
 
-    def _dispose(self):
-        if _BattleClockView._g_ctrl:
-            _BattleClockView._g_ctrl._onBattleFlashDisposed()
-        super(_BattleClockView, self)._dispose()
+        def _initialize(self):
+            super(_ClockModel, self)._initialize()
+            self._addStringProperty('payload', self._payload)
+            self.onReady = self._addCommand('onReady')
 
-    def as_updateTime(self, timeStr):
-        if self._isDAAPIInited():
-            self.flashObject.as_updateTime(timeStr)
+        def setPayload(self, value):
+            self._setString(0, value)
 
-    def as_setVisible(self, isVisible):
-        if self._isDAAPIInited():
-            self.flashObject.as_setVisible(isVisible)
+    class _ClockView(ViewImpl):
+        def __init__(self, owner):
+            self._owner = owner
+            model = _ClockModel(owner.buildPayload())
+            owner._setModel(model, publish=False)
+            settings = ViewSettings(layoutID=owner.layoutID(), flags=ViewFlags.VIEW, model=model)
+            super(_ClockView, self).__init__(settings)
 
-    def updateSettings(self):
-        if self._isDAAPIInited():
-            self.flashObject.as_setSettings({
-                'offset': g_config.battleOffset,
-                'color': g_configParams.timeColor.getPackedColor()
-            })
+        def _getEvents(self):
+            return ((self.getViewModel().onReady, self._owner._onReady),)
 
+        def _finalize(self):
+            self._owner._setModel(None)
+            super(_ClockView, self)._finalize()
+            self._owner._onViewFinalized()
 
-class _GarageInjectorView(View):
-    _g_ctrl = None
+    class _ClockWindow(WindowImpl):
+        def __init__(self, content, parent, name):
+            super(_ClockWindow, self).__init__(WindowFlags.WINDOW, content=content, layer=WindowLayer.OVERLAY, name=name, parent=parent)
 
-    def _populate(self):
-        super(_GarageInjectorView, self)._populate()
-        if _GarageInjectorView._g_ctrl:
-            _GarageInjectorView._g_ctrl._onGarageInjectorReady(self)
+    class _ClockOverlay(object):
+        def __init__(self, name, mode, size, getOffset, setOffset, getDefault):
+            self._name = name
+            self._mode = mode
+            self._w, self._h = _clockSize(mode)
+            self._getOffset = getOffset
+            self._setOffset = setOffset
+            self._getDefault = getDefault
+            self._layout = ModDynAccessor('mods/under_pressure/%s/layoutID' % name)
+            self._window = None
+            self._model = None
+            self._token = 0
+            self._nativeReady = False
+            self._destroyed = False
+            self._active = False
+            self._visible = True
+            self._position = list(getDefault())
+            self._positionLoaded = False
+            self._positionDirty = False
+            self._lastSaved = None
+            self._dragging = False
+            self._mouseWasDown = False
+            self._dragStartCursor = None
+            self._dragStartPosition = None
+            self._dragCallbackID = None
 
-    def _dispose(self):
-        if _GarageInjectorView._g_ctrl:
-            _GarageInjectorView._g_ctrl._onGarageInjectorDisposed()
-        super(_GarageInjectorView, self)._dispose()
+        def layoutID(self):
+            return self._layout()
 
-    def py_onDragEnd(self, offset):
-        g_config.setGarageOffset([int(offset[0]), int(offset[1])])
+        def buildPayload(self):
+            self._syncSize()
+            return _buildPayload(self._mode, (self._w, self._h), self._visible)
 
-    def updateSettings(self):
-        if self.flashObject:
-            self.flashObject.as_setSettings({
-                'offset': g_config.garageOffset,
-                'color': g_configParams.timeColor.getPackedColor()
-            })
+        def _syncSize(self):
+            width, height = _clockSize(self._mode)
+            if width == self._w and height == self._h:
+                return False
+            self._w = width
+            self._h = height
+            return True
 
-    def py_onPanelReady(self):
-        if _GarageInjectorView._g_ctrl:
-            _GarageInjectorView._g_ctrl._onGaragePanelReady()
+        def enable(self):
+            self._destroyed = False
+            if self._active:
+                self.refresh()
+                return
+            self._active = True
+            self._visible = True
+            self._loadPosition()
+            self._ensureWindow()
+            self._startDragTicker()
 
+        def disable(self):
+            self._active = False
+            self._stopDragTicker()
+            self._flushPosition()
+            self._destroyed = True
+            self._dropWindow()
 
-def _registerFlashComponents():
-    g_entitiesFactories.addSettings(ViewSettings(
-        _BATTLE_INJECTOR_LINKAGE, _BattleInjectorView, _BATTLE_SWF,
-        WindowLayer.WINDOW, None, ScopeTemplates.GLOBAL_SCOPE
-    ))
-    g_entitiesFactories.addSettings(ViewSettings(
-        _BATTLE_COMPONENT_LINKAGE, _BattleClockView, None,
-        WindowLayer.UNDEFINED, None, ScopeTemplates.DEFAULT_SCOPE
-    ))
-    g_entitiesFactories.addSettings(ViewSettings(
-        _GARAGE_INJECTOR_LINKAGE, _GarageInjectorView, _GARAGE_SWF,
-        WindowLayer.WINDOW, None, ScopeTemplates.GLOBAL_SCOPE
-    ))
+        def setVisible(self, value):
+            value = bool(value)
+            if value == self._visible:
+                return
+            self._visible = value
+            self.publish()
 
+        def refresh(self):
+            self.publish()
 
-def _unregisterFlashComponents():
-    for linkage in (_BATTLE_INJECTOR_LINKAGE, _BATTLE_COMPONENT_LINKAGE, _GARAGE_INJECTOR_LINKAGE):
-        try:
-            g_entitiesFactories.removeSettings(linkage)
-        except Exception:
+        def _setModel(self, model, publish=True):
+            self._model = model
+            if publish:
+                self.publish()
+
+        def publish(self):
+            if self._model is None:
+                return
+            sizeChanged = self._syncSize()
+            payload = _buildPayload(self._mode, (self._w, self._h), self._visible)
+            try:
+                with self._model.transaction() as model:
+                    model.setPayload(payload)
+            except Exception:
+                pass
+            if sizeChanged:
+                self._move()
+
+        def _onReady(self, *args):
+            self._nativeReady = True
+            self.publish()
+            self._move()
+
+        def _onViewFinalized(self):
+            self._window = None
+            self._model = None
+            self._nativeReady = False
+            self._token += 1
+            if self._active and not self._destroyed:
+                BigWorld.callback(0.1, self._ensureWindow)
+
+        def _ensureWindow(self):
+            if self._destroyed or self._window is not None:
+                return
+            if gamefaceResMap is None:
+                return
+            self._token += 1
+            token = self._token
+            if gamefaceResMap.isResMapValidated:
+                self._load(token)
+            else:
+                gamefaceOnReady(lambda: self._load(token))
+
+        def _load(self, token, retry=0):
+            if token != self._token or self._destroyed:
+                return
+            try:
+                parent = dependency.instance(IGuiLoader).windowsManager.getMainWindow()
+            except Exception:
+                parent = None
+            if parent is None or parent.proxy is None or parent.windowStatus != WindowStatus.LOADED:
+                if retry < 100:
+                    BigWorld.callback(0.1, lambda: self._load(token, retry + 1))
+                return
+            try:
+                self._window = _ClockWindow(_ClockView(self), parent, self._name)
+                self._window.load()
+            except Exception:
+                logger.exception('[Watch] Failed to load overlay %s', self._name)
+                self._window = None
+
+        def _dropWindow(self):
+            self._token += 1
+            if self._window is not None:
+                try:
+                    self._window.destroy()
+                except Exception:
+                    pass
+                self._window = None
+            self._model = None
+            self._nativeReady = False
+
+        def _move(self):
+            if self._window is None or not self._nativeReady:
+                return
+            self._clampPosition()
+            try:
+                self._window.move(int(self._position[0]), int(self._position[1]))
+            except Exception:
+                pass
+
+        def _startDragTicker(self):
+            if self._dragCallbackID is None:
+                self._dragCallbackID = BigWorld.callback(0.0, self._updateDragState)
+
+        def _stopDragTicker(self):
+            _cancelCallbackSafe(self._dragCallbackID)
+            self._dragCallbackID = None
+            self._dragging = False
+            self._mouseWasDown = False
+            self._dragStartCursor = None
+            self._dragStartPosition = None
+
+        def _updateDragState(self):
+            self._dragCallbackID = None
+            if self._window is None:
+                return
+            self._handleMouseDrag()
+            self._dragCallbackID = BigWorld.callback(0.0, self._updateDragState)
+
+        def _handleMouseDrag(self):
+            cursor = GUI.mcursor()
+            if not cursor.visible or not cursor.inWindow or not cursor.inFocus:
+                self._dragging = False
+                self._mouseWasDown = False
+                return
+            mouseDown = BigWorld.isKeyDown(Keys.KEY_LEFTMOUSE)
+            cursorPos = _cursorPixels(cursor)
+            if mouseDown and not self._mouseWasDown:
+                if self._isCursorOver(cursorPos):
+                    self._dragging = True
+                    self._dragStartCursor = cursorPos
+                    self._dragStartPosition = tuple(self._position)
+            elif not mouseDown:
+                if self._dragging:
+                    self._flushPosition()
+                self._dragging = False
+            if self._dragging and self._dragStartCursor is not None and self._dragStartPosition is not None:
+                dx = cursorPos[0] - self._dragStartCursor[0]
+                dy = cursorPos[1] - self._dragStartCursor[1]
+                self._setPosition(self._dragStartPosition[0] + dx, self._dragStartPosition[1] + dy)
+            self._mouseWasDown = mouseDown
+
+        def _isCursorOver(self, cursorPos):
+            if not self._visible or self._window is None:
+                return False
+            left, top = self._position[0], self._position[1]
+            return left <= cursorPos[0] <= left + self._w and top <= cursorPos[1] <= top + self._h
+
+        def _setPosition(self, x, y):
+            cx, cy = clampCoordinates(x, y, (self._w, self._h), 0, 0)
+            if cx == self._position[0] and cy == self._position[1]:
+                return
+            self._position[0] = cx
+            self._position[1] = cy
+            self._positionDirty = True
+            self._move()
+
+        def _clampPosition(self):
+            cx, cy = clampCoordinates(self._position[0], self._position[1], (self._w, self._h), 0, 0)
+            self._position[0] = cx
+            self._position[1] = cy
+
+        def _loadPosition(self):
+            if self._positionLoaded:
+                return
+            self._positionLoaded = True
+            self._position = list(self._getOffset())
+            self._lastSaved = (self._position[0], self._position[1])
+            self._positionDirty = False
+
+        def _flushPosition(self):
+            if not self._positionDirty:
+                return
+            current = (self._position[0], self._position[1])
+            if self._lastSaved == current:
+                self._positionDirty = False
+                return
+            self._setOffset([self._position[0], self._position[1]])
+            self._lastSaved = current
+            self._positionDirty = False
+
+    def _makeOverlay(name, mode, size, getOffset, setOffset, getDefault):
+        return _ClockOverlay(name, mode, size, getOffset, setOffset, getDefault)
+
+else:
+
+    class _NullOverlay(object):
+        def enable(self):
             pass
+
+        def disable(self):
+            pass
+
+        def setVisible(self, value):
+            pass
+
+        def refresh(self):
+            pass
+
+    def _makeOverlay(name, mode, size, getOffset, setOffset, getDefault):
+        return _NullOverlay()
 
 
 class _BattleClock(object):
-
     def __init__(self):
-        self._injectorView = None
-        self._componentView = None
-        self._flashReady = False
-        self._isActive = False
-        self._battleSessionId = 0
-        self._tickCallbackId = None
+        self._overlay = _makeOverlay(
+            _BATTLE_NAME, 'battle', _BATTLE_SIZE,
+            lambda: g_config.battleOffset, g_config.setBattleOffset,
+            lambda: list(_DEFAULT_BATTLE_OFFSET))
+        self._pageReady = False
+        self._guiBound = False
+        self._configBound = False
         self._hiddenByUI = False
         self._hiddenByStats = False
-        self._guiEventsBound = False
 
-    def onAvatarReady(self):
-        if not g_configParams.enabled.value or not g_configParams.battleEnabled.value:
+    def onBattlePageReady(self):
+        self._pageReady = True
+        if not (g_configParams.enabled.value and g_configParams.battleEnabled.value):
             return
-        self._battleSessionId += 1
-        self._isActive = True
         self._hiddenByUI = False
         self._hiddenByStats = False
-        _BattleInjectorView._g_ctrl = self
-        _BattleClockView._g_ctrl = self
-        self._injectBattleFlash()
-        self._bindGUIEvents()
+        self._overlay.enable()
+        self._overlay.setVisible(True)
+        self._bindGUI()
+        self._bindConfig()
 
-    def onAvatarGone(self):
-        g_config.save()
-        self._battleSessionId += 1
-        self._isActive = False
-        self._unbindGUIEvents()
-        self._stopTicker()
-        _BattleInjectorView._g_ctrl = None
-        _BattleClockView._g_ctrl = None
-        self._injectorView = None
-        self._componentView = None
-        self._flashReady = False
+    def onBattlePageDisposed(self):
+        self._pageReady = False
+        self._unbindGUI()
+        self._unbindConfig()
+        self._overlay.disable()
 
     def fini(self):
-        self.onAvatarGone()
+        self.onBattlePageDisposed()
 
-    def _injectBattleFlash(self, attempt=0):
-        sessionId = self._battleSessionId
-        try:
-            app = ServicesLocator.appLoader.getDefBattleApp()
-            if app:
-                app.loadView(SFViewLoadParams(_BATTLE_INJECTOR_LINKAGE))
-                return
-        except Exception:
-            pass
-        if attempt < 30 and self._isActive and self._battleSessionId == sessionId:
-            BigWorld.callback(0.5, lambda: self._injectBattleFlash(attempt + 1))
-
-    def _onBattleInjectorReady(self, view):
-        self._injectorView = view
-
-    def _onBattleInjectorDisposed(self):
-        self._injectorView = None
-
-    def _onBattleFlashReady(self, view):
-        self._componentView = view
-        self._flashReady = True
-        self._componentView.updateSettings()
-        self._componentView.as_setVisible(True)
-        self._startTicker()
+    def _bindConfig(self):
+        if self._configBound:
+            return
+        self._configBound = True
         g_config.onConfigChanged += self._onConfigChanged
 
-    def _onBattleFlashDisposed(self):
+    def _unbindConfig(self):
+        if not self._configBound:
+            return
+        self._configBound = False
         try:
             g_config.onConfigChanged -= self._onConfigChanged
         except Exception:
             pass
-        self._componentView = None
-        self._flashReady = False
 
     def _onConfigChanged(self):
-        if self._flashReady and self._componentView:
-            self._componentView.updateSettings()
-
-    def _bindGUIEvents(self):
-        if self._guiEventsBound:
+        if not (g_configParams.enabled.value and g_configParams.battleEnabled.value):
+            self._overlay.disable()
             return
-        self._guiEventsBound = True
+        if self._pageReady:
+            self._overlay.enable()
+            self._overlay.setVisible(self._isVisible())
+
+    def _bindGUI(self):
+        if self._guiBound:
+            return
+        self._guiBound = True
         try:
             g_eventBus.addListener(GameEvent.GUI_VISIBILITY, self._onGUIVisibility, scope=EVENT_BUS_SCOPE.BATTLE)
             g_eventBus.addListener(GameEvent.FULL_STATS, self._onToggleStats, scope=EVENT_BUS_SCOPE.BATTLE)
@@ -608,10 +854,10 @@ class _BattleClock(object):
         except Exception:
             pass
 
-    def _unbindGUIEvents(self):
-        if not self._guiEventsBound:
+    def _unbindGUI(self):
+        if not self._guiBound:
             return
-        self._guiEventsBound = False
+        self._guiBound = False
         try:
             g_eventBus.removeListener(GameEvent.GUI_VISIBILITY, self._onGUIVisibility, scope=EVENT_BUS_SCOPE.BATTLE)
             g_eventBus.removeListener(GameEvent.FULL_STATS, self._onToggleStats, scope=EVENT_BUS_SCOPE.BATTLE)
@@ -624,227 +870,187 @@ class _BattleClock(object):
         hidden = not event.ctx.get('visible', True)
         if hidden != self._hiddenByUI:
             self._hiddenByUI = hidden
-            self._updateVisibility()
+            self._overlay.setVisible(self._isVisible())
 
     def _onToggleStats(self, event):
         hidden = event.ctx.get('isDown', False)
         if hidden != self._hiddenByStats:
             self._hiddenByStats = hidden
-            self._updateVisibility()
+            self._overlay.setVisible(self._isVisible())
 
-    def _updateVisibility(self):
-        if not self._flashReady or not self._componentView:
-            return
-        isVisible = self._isClockVisible()
-        self._componentView.as_setVisible(isVisible)
-        if isVisible:
-            self._pushTime()
-
-    def _isClockVisible(self):
+    def _isVisible(self):
         return not self._hiddenByUI and not self._hiddenByStats
-
-    def _startTicker(self):
-        self._stopTicker()
-        self._onTick()
-
-    def _stopTicker(self):
-        _cancelCallbackSafe(self._tickCallbackId)
-        self._tickCallbackId = None
-
-    def _onTick(self):
-        self._tickCallbackId = None
-        if not self._isActive:
-            return
-        self._pushTime()
-        self._tickCallbackId = BigWorld.callback(1.0, _weakCallback(self, '_onTick'))
-
-    def _pushTime(self):
-        if not self._flashReady or not self._componentView:
-            return
-        if not self._isClockVisible():
-            return
-        self._componentView.as_updateTime(time.strftime('%H:%M:%S'))
-
-    def _onDragEnd(self, offset):
-        try:
-            g_config.updateBattleOffset([int(offset[0]), int(offset[1])])
-        except (TypeError, ValueError, IndexError) as e:
-            logger.error('[BattleClock] Error processing drag end: %s', e)
 
 
 class _GarageClock(object):
-
     def __init__(self):
-        self._injectorView = None
-        self._flashReady = False
-        self._enabled = False
-        self._hangarVisible = False
-        self._tickCallbackId = None
-        self._garageSessionId = 0
+        self._overlay = _makeOverlay(
+            _GARAGE_NAME, 'garage', _GARAGE_SIZE,
+            lambda: g_config.garageOffset, g_config.setGarageOffset,
+            lambda: list(_DEFAULT_GARAGE_OFFSET))
+        self._stateMachine = None
+        self._smCallbackID = None
+        self._isGarage = False
+        self._configBound = False
 
-    def enable(self):
-        if self._enabled:
+    def bind(self, retry=0):
+        self._smCallbackID = None
+        stateMachine = getLobbyStateMachine()
+        if stateMachine is None:
+            if retry < 100:
+                self._smCallbackID = BigWorld.callback(0.1, lambda: self.bind(retry + 1))
             return
-        if not g_configParams.enabled.value or not g_configParams.garageEnabled.value:
-            return
-        self._enabled = True
-        self._garageSessionId += 1
-        self._injectorView = None
-        self._flashReady = False
-        self._hangarVisible = False
-        _GarageInjectorView._g_ctrl = self
-        try:
-            lsm = getLobbyStateMachine()
-            if lsm:
-                lsm.onVisibleRouteChanged += self._onVisibleRouteChanged
-                self._hangarVisible = _isHangarState(lsm.getState())
-        except Exception:
-            self._hangarVisible = True
-        if self._hangarVisible:
-            self._injectFlash()
-        g_config.onConfigChanged += self._onConfigChanged
+        if self._stateMachine is not stateMachine:
+            self.unbind()
+            self._stateMachine = stateMachine
+            stateMachine.onVisibleRouteChanged += self._onVisibleRouteChanged
+        if not self._configBound:
+            self._configBound = True
+            g_config.onConfigChanged += self._onConfigChanged
+        self._onVisibleRouteChanged(getattr(stateMachine, 'visibleRouteInfo', None))
+
+    def unbind(self):
+        if self._smCallbackID is not None:
+            _cancelCallbackSafe(self._smCallbackID)
+            self._smCallbackID = None
+        if self._stateMachine is not None:
+            try:
+                self._stateMachine.onVisibleRouteChanged -= self._onVisibleRouteChanged
+            except Exception:
+                pass
+            self._stateMachine = None
+        if self._configBound:
+            self._configBound = False
+            try:
+                g_config.onConfigChanged -= self._onConfigChanged
+            except Exception:
+                pass
+        self._isGarage = False
 
     def disable(self):
-        if not self._enabled:
-            return
-        self._enabled = False
-        self._garageSessionId += 1
-        self._stopTicker()
-        try:
-            g_config.onConfigChanged -= self._onConfigChanged
-        except Exception:
-            pass
-        try:
-            lsm = getLobbyStateMachine()
-            if lsm:
-                lsm.onVisibleRouteChanged -= self._onVisibleRouteChanged
-        except Exception:
-            pass
-        _GarageInjectorView._g_ctrl = None
-        self._injectorView = None
-        self._flashReady = False
-        self._hangarVisible = False
+        self.unbind()
+        self._overlay.disable()
 
     def fini(self):
         self.disable()
 
-    def _onConfigChanged(self):
-        if not g_configParams.enabled.value or not g_configParams.garageEnabled.value:
-            if self._flashReady and self._injectorView:
-                self._injectorView.flashObject.as_setVisible(False)
-            return
-        if self._flashReady and self._injectorView:
-            self._injectorView.updateSettings()
-            self._injectorView.flashObject.as_setVisible(self._hangarVisible)
-
     def _onVisibleRouteChanged(self, routeInfo):
-        try:
-            self._hangarVisible = _isHangarState(routeInfo.state)
-        except Exception:
-            self._hangarVisible = True
-        if self._hangarVisible and not self._flashReady and not self._injectorView:
-            self._injectFlash()
-        self._updatePanelVisibility()
+        state = getattr(routeInfo, 'state', None)
+        self._isGarage = self._checkGarageState(state)
+        if self._isGarage and g_configParams.enabled.value and g_configParams.garageEnabled.value:
+            self._overlay.enable()
+            self._overlay.setVisible(True)
+        else:
+            self._overlay.disable()
 
-    def _updatePanelVisibility(self):
-        if self._flashReady and self._injectorView:
-            self._injectorView.flashObject.as_setVisible(self._hangarVisible)
+    def _checkGarageState(self, state):
+        sm = self._stateMachine
+        if sm is not None and (DefaultHangarState is not None or LegacyHangarState is not None):
+            try:
+                targets = []
+                if DefaultHangarState is not None:
+                    targets.append(sm.getStateByCls(DefaultHangarState))
+                if LegacyHangarState is not None:
+                    targets.append(sm.getStateByCls(LegacyHangarState))
+                if state in targets:
+                    return True
+            except Exception:
+                pass
+        return _isHangarState(state)
 
-    def _injectFlash(self, attempt=0, sessionId=None):
-        if sessionId is None:
-            sessionId = self._garageSessionId
-        if not self._enabled or sessionId != self._garageSessionId:
-            return
-        try:
-            app = ServicesLocator.appLoader.getDefLobbyApp()
-            if app and app.initialized:
-                app.loadView(SFViewLoadParams(_GARAGE_INJECTOR_LINKAGE))
-                return
-        except Exception:
-            pass
-        if attempt < 30:
-            BigWorld.callback(0.5, lambda: self._injectFlash(attempt + 1, sessionId))
+    def _onConfigChanged(self):
+        self._onVisibleRouteChanged(getattr(self._stateMachine, 'visibleRouteInfo', None))
 
-    def _onGarageInjectorReady(self, view):
-        self._injectorView = view
 
-    def _onGarageInjectorDisposed(self):
-        self._injectorView = None
-        self._flashReady = False
-        self._stopTicker()
+_ORIGINAL_BATTLE_POPULATE = None
+_ORIGINAL_BATTLE_DISPOSE = None
+_HOOKS_INSTALLED = False
 
-    def _onGaragePanelReady(self):
-        self._flashReady = True
-        if self._injectorView:
-            self._injectorView.updateSettings()
-            self._injectorView.flashObject.as_setVisible(self._hangarVisible)
-        self._pushTime()
-        self._startTicker()
 
-    def _startTicker(self):
-        self._stopTicker()
-        self._onTick()
+def _battlePagePopulate(self, *args, **kwargs):
+    result = _ORIGINAL_BATTLE_POPULATE(self, *args, **kwargs)
+    try:
+        _g_mod.onBattlePageReady()
+    except Exception:
+        logger.exception('[Watch] battle page ready hook failed')
+    return result
 
-    def _stopTicker(self):
-        _cancelCallbackSafe(self._tickCallbackId)
-        self._tickCallbackId = None
 
-    def _onTick(self):
-        self._tickCallbackId = None
-        if not self._enabled:
-            return
-        self._pushTime()
-        self._tickCallbackId = BigWorld.callback(1.0, _weakCallback(self, '_onTick'))
+def _battlePageDispose(self, *args, **kwargs):
+    try:
+        _g_mod.onBattlePageDisposed()
+    except Exception:
+        logger.exception('[Watch] battle page dispose hook failed')
+    return _ORIGINAL_BATTLE_DISPOSE(self, *args, **kwargs)
 
-    def _pushTime(self):
-        if not self._flashReady or not self._injectorView:
-            return
-        now = time.localtime()
-        timeStr = time.strftime('%H:%M:%S', now)
-        dayName = _getLocalizedDayName(now.tm_wday)
-        dateStr = u'%s, %s' % (dayName, time.strftime('%d.%m.%Y', now))
-        self._injectorView.flashObject.as_updateTime(timeStr, dateStr)
+
+def _installHooks():
+    global _HOOKS_INSTALLED, _ORIGINAL_BATTLE_POPULATE, _ORIGINAL_BATTLE_DISPOSE
+    if _HOOKS_INSTALLED or SharedPage is None:
+        return
+    _ORIGINAL_BATTLE_POPULATE = SharedPage._populate
+    _ORIGINAL_BATTLE_DISPOSE = SharedPage._dispose
+    SharedPage._populate = _battlePagePopulate
+    SharedPage._dispose = _battlePageDispose
+    _HOOKS_INSTALLED = True
+
+
+def _restoreHooks():
+    global _HOOKS_INSTALLED
+    if not _HOOKS_INSTALLED or SharedPage is None:
+        return
+    if SharedPage._populate is _battlePagePopulate:
+        SharedPage._populate = _ORIGINAL_BATTLE_POPULATE
+    if SharedPage._dispose is _battlePageDispose:
+        SharedPage._dispose = _ORIGINAL_BATTLE_DISPOSE
+    _HOOKS_INSTALLED = False
 
 
 class _WatchMod(object):
-
     def __init__(self):
         self._battleClock = _BattleClock()
         self._garageClock = _GarageClock()
 
     def init(self):
-        _registerFlashComponents()
+        if _GF_OK:
+            _installHooks()
         g_playerEvents.onAccountShowGUI += self._onAccountShowGUI
-        g_playerEvents.onAvatarReady += self._onAvatarReady
+        g_playerEvents.onAvatarBecomePlayer += self._onAvatarBecomePlayer
         g_playerEvents.onAccountBecomeNonPlayer += self._onAccountBecomeNonPlayer
         g_playerEvents.onDisconnected += self._onDisconnected
         logger.debug('[Watch] Initialized v%s', __version__)
 
     def fini(self):
         g_playerEvents.onAccountShowGUI -= self._onAccountShowGUI
-        g_playerEvents.onAvatarReady -= self._onAvatarReady
+        g_playerEvents.onAvatarBecomePlayer -= self._onAvatarBecomePlayer
         g_playerEvents.onAccountBecomeNonPlayer -= self._onAccountBecomeNonPlayer
         g_playerEvents.onDisconnected -= self._onDisconnected
-        self._garageClock.disable()
-        self._battleClock.onAvatarGone()
-        _unregisterFlashComponents()
+        _restoreHooks()
+        self._garageClock.fini()
+        self._battleClock.fini()
         g_config.fini()
         logger.debug('[Watch] Finalized')
 
-    def _onAccountShowGUI(self, ctx):
-        self._battleClock.onAvatarGone()
-        self._garageClock.enable()
-
-    def _onAvatarReady(self):
+    def onBattlePageReady(self):
         self._garageClock.disable()
-        self._battleClock.onAvatarReady()
+        self._battleClock.onBattlePageReady()
+
+    def onBattlePageDisposed(self):
+        self._battleClock.onBattlePageDisposed()
+
+    def _onAccountShowGUI(self, ctx):
+        self._battleClock.onBattlePageDisposed()
+        self._garageClock.bind()
+
+    def _onAvatarBecomePlayer(self):
+        self._garageClock.disable()
 
     def _onAccountBecomeNonPlayer(self):
-        self._battleClock.onAvatarGone()
+        self._battleClock.onBattlePageDisposed()
 
     def _onDisconnected(self):
         self._garageClock.disable()
-        self._battleClock.onAvatarGone()
+        self._battleClock.onBattlePageDisposed()
 
 
 _g_mod = _WatchMod()
@@ -862,3 +1068,4 @@ def fini():
         _g_mod.fini()
     except Exception:
         logger.exception('[Watch] Failed to finalize')
+
