@@ -1,4 +1,4 @@
-# CalculationElo
+# Watch
 
 <img align="left" src="https://shields.io/badge/version-1.2.2-blue">
 <br>
