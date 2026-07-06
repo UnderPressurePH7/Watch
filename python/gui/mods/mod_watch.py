@@ -18,7 +18,7 @@ except Exception:
 logger = logging.getLogger('Watch')
 logger.setLevel(logging.DEBUG if os.path.isfile('.debug_mods') else logging.ERROR)
 
-__version__ = '0.1.0'
+__version__ = '0.1.1'
 __author__ = 'Under_Pressure'
 
 _GF_OK = True
@@ -698,9 +698,10 @@ if _GF_OK:
 
         def _updateDragState(self):
             self._dragCallbackID = None
-            if self._window is None:
+            if not self._active:
                 return
-            self._handleMouseDrag()
+            if self._window is not None:
+                self._handleMouseDrag()
             self._dragCallbackID = BigWorld.callback(0.0, self._updateDragState)
 
         def _handleMouseDrag(self):
@@ -1053,19 +1054,19 @@ class _WatchMod(object):
         self._battleClock.onBattlePageDisposed()
 
 
-_g_mod = _WatchMod()
+_g_WatchMod = _WatchMod()
 
 
 def init():
     try:
-        _g_mod.init()
+        _g_WatchMod.init()
     except Exception:
         logger.exception('[Watch] Failed to initialize')
 
 
 def fini():
     try:
-        _g_mod.fini()
+        _g_WatchMod.fini()
     except Exception:
         logger.exception('[Watch] Failed to finalize')
 
