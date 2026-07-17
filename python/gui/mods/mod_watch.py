@@ -1085,7 +1085,7 @@ _HOOKS_INSTALLED = False
 def _battlePagePopulate(self, *args, **kwargs):
     result = _ORIGINAL_BATTLE_POPULATE(self, *args, **kwargs)
     try:
-        _g_mod.onBattlePageReady()
+        _g_WatchMod.onBattlePageReady()
     except Exception:
         logger.exception('[Watch] battle page ready hook failed')
     return result
@@ -1093,7 +1093,7 @@ def _battlePagePopulate(self, *args, **kwargs):
 
 def _battlePageDispose(self, *args, **kwargs):
     try:
-        _g_mod.onBattlePageDisposed()
+        _g_WatchMod.onBattlePageDisposed()
     except Exception:
         logger.exception('[Watch] battle page dispose hook failed')
     return _ORIGINAL_BATTLE_DISPOSE(self, *args, **kwargs)
