@@ -174,9 +174,15 @@
         });
     }
 
+    applyConfig();
+    applyScale();
+    render();
+    reportSize();
+
     if (window.engine && window.engine.whenReady) {
         var domReady = window.isDomBuilt ? Promise.resolve() : new Promise(function (resolve) {
             window.engine.on('self.onDomBuilt', resolve);
+            window.setTimeout(resolve, 1000);
         });
         Promise.all([window.engine.whenReady, domReady]).then(afterFrames);
     } else {
