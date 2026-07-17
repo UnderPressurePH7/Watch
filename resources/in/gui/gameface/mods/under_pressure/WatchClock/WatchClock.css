@@ -1,3 +1,7 @@
+html {
+    font-size: 1px;
+}
+
 html, body {
     width: 100%;
     height: 100%;
@@ -12,16 +16,18 @@ html, body {
 }
 
 #watch-root {
-    display: block;
-    width: 100%;
-    height: auto;
+    display: inline-block;
     padding: 0;
     overflow: hidden;
     white-space: nowrap;
     font-family: Arial, "Helvetica Neue", Helvetica, sans-serif;
     font-weight: bold;
     font-variant-numeric: tabular-nums;
-    text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.85);
+    text-shadow: 1rem 1rem 2rem rgba(0, 0, 0, 0.85);
+}
+
+#watch-root.watch-hidden {
+    visibility: hidden;
 }
 
 #watch-root.watch-garage {
@@ -43,13 +49,13 @@ html, body {
 }
 
 #watch-root.watch-battle #watch-time {
-    font-size: 24px;
+    font-size: 24rem;
 }
 
 #watch-root.watch-garage #watch-time {
-    font-size: 26px;
+    font-size: 26rem;
 }
 
 #watch-root.watch-garage #watch-date {
-    font-size: 14px;
+    font-size: 14rem;
 }

@@ -18,7 +18,7 @@ except Exception:
 logger = logging.getLogger('Watch')
 logger.setLevel(logging.DEBUG if os.path.isfile('.debug_mods') else logging.ERROR)
 
-__version__ = '0.1.1'
+__version__ = '0.2.0'
 __author__ = 'Under_Pressure'
 
 _GF_OK = True
@@ -28,11 +28,22 @@ try:
     from openwg_gameface import ModDynAccessor, manager as gamefaceResMap, on_ready as gamefaceOnReady
     from frameworks.wulf import ViewFlags, ViewModel, ViewSettings, WindowFlags, WindowLayer, WindowStatus
     from gui.impl.pub import ViewImpl, WindowImpl
+    from gui.impl.gui_decorators import args2params
     from helpers import dependency
     from skeletons.gui.impl import IGuiLoader
 except Exception:
     _GF_OK = False
     logger.error('[Watch] openwg_gameface is required. Get it at https://gitlab.com/openwg/wot.gameface', exc_info=True)
+
+try:
+    from gui import g_guiResetters
+except Exception:
+    g_guiResetters = None
+
+try:
+    from gui.shared.personality import ServicesLocator
+except Exception:
+    ServicesLocator = None
 
 try:
     from gui.Scaleform.daapi.view.battle.shared.page import SharedPage
@@ -50,14 +61,17 @@ _CONFIG_ENCODING_UTF8 = 'utf-8'
 _CONFIG_ENCODING_UTF8_BOM = 'utf-8-bom'
 _UTF8_BOM = '\xef\xbb\xbf'
 
-_DEFAULT_BATTLE_OFFSET = [872, 8]
-_DEFAULT_GARAGE_OFFSET = [1650, 60]
+
+_DEFAULT_BATTLE_OFFSET = [-32, 8]
+_DEFAULT_GARAGE_OFFSET = [-100, 60]
 
 _BATTLE_NAME = 'WatchBattle'
 _GARAGE_NAME = 'WatchGarage'
 
 _BATTLE_SIZE = (112, 30)
 _GARAGE_SIZE = (170, 50)
+
+_BASE_SCREEN = (1920, 1080)
 
 MOD_LINKAGE = 'me.under_pressure.watch'
 
@@ -135,50 +149,6 @@ def _dayNames():
     return days
 
 
-def _toUnicodeText(value):
-    if isinstance(value, unicode):
-        return value
-    try:
-        return unicode(value, 'utf-8')
-    except Exception:
-        return unicode(value)
-
-
-def _textWidth(text, fontSize):
-    width = 0.0
-    for ch in _toUnicodeText(text):
-        code = ord(ch)
-        if ch == ' ':
-            width += fontSize * 0.30
-        elif ch in u':.,':
-            width += fontSize * 0.26
-        elif ch.isdigit():
-            width += fontSize * 0.56
-        elif code > 127:
-            width += fontSize * 0.58
-        elif ch.isupper():
-            width += fontSize * 0.65
-        else:
-            width += fontSize * 0.52
-    return int(width + 4)
-
-
-def _clockSize(mode):
-    p = g_configParams
-    if p.use24h.value:
-        timeSample = u'88:88:88' if p.showSeconds.value else u'88:88'
-    else:
-        timeSample = u'88:88:88 PM' if p.showSeconds.value else u'88:88 PM'
-    timeFont = 24 if mode == 'battle' else 26
-    timeWidth = _textWidth(timeSample, timeFont)
-    timeHeight = int(timeFont * 1.1 + 4)
-    if mode == 'battle':
-        return (max(1, timeWidth), max(1, timeHeight))
-    dateSample = max([_toUnicodeText(day) + u', 88.88.8888' for day in _dayNames()], key=lambda value: _textWidth(value, 14))
-    dateWidth = _textWidth(dateSample, 14)
-    dateHeight = int(14 * 1.1 + 4)
-    return (max(1, timeWidth, dateWidth), max(1, timeHeight + dateHeight))
-
 def _loadLocalization():
     global _l10n
     import ResMgr
@@ -245,8 +215,34 @@ def _saveJsonFile(path, data, encoding):
         f.write(raw)
 
 
+def _screenResolution():
+    try:
+        if GUI is not None:
+            width, height = GUI.screenResolution()[:2]
+            if width > 0 and height > 0:
+                return (int(width), int(height))
+    except Exception:
+        pass
+    try:
+        width, height = BigWorld.screenWidth(), BigWorld.screenHeight()
+        if width > 0 and height > 0:
+            return (int(width), int(height))
+    except Exception:
+        pass
+    return _BASE_SCREEN
+
+
+def _interfaceScale():
+    try:
+        if ServicesLocator is not None:
+            return float(ServicesLocator.settingsCore.interfaceScale.get())
+    except Exception:
+        pass
+    return 1.0
+
+
 def clampCoordinates(xPos, yPos, size, padX=0, padY=0):
-    screenWidth, screenHeight = GUI.screenResolution()
+    screenWidth, screenHeight = _screenResolution()
     maxX = max(padX, screenWidth - size[0] - padX)
     maxY = max(padY, screenHeight - size[1] - padY)
     clampedX = max(padX, min(int(round(xPos)), maxX))
@@ -256,10 +252,20 @@ def clampCoordinates(xPos, yPos, size, padX=0, padY=0):
 
 def _cursorPixels(cursor):
     normX, normY = cursor.position
-    screenWidth, screenHeight = GUI.screenResolution()
+    screenWidth, screenHeight = _screenResolution()
     pixelX = int((normX + 1.0) * 0.5 * screenWidth)
     pixelY = int((1.0 - normY) * 0.5 * screenHeight)
     return (pixelX, pixelY)
+
+
+def _battleAnchor(viewSize):
+    screenWidth, _ = _screenResolution()
+    return (int(screenWidth * 0.5 - viewSize[0] * 0.5), 0)
+
+
+def _garageAnchor(viewSize):
+    screenWidth, _ = _screenResolution()
+    return (int(screenWidth - viewSize[0]), 0)
 
 
 def _createTooltip(header=None, body=None):
@@ -385,12 +391,13 @@ class _Config(object):
                     param.value = _toColorList(data[token])
             else:
                 missing = True
-        if 'battle-offset' in data:
-            self.battleOffset = _toOffsetList(data['battle-offset'], _DEFAULT_BATTLE_OFFSET)
+
+        if 'battle-anchor-offset' in data:
+            self.battleOffset = _toOffsetList(data['battle-anchor-offset'], _DEFAULT_BATTLE_OFFSET)
         else:
             missing = True
-        if 'garage-offset' in data:
-            self.garageOffset = _toOffsetList(data['garage-offset'], _DEFAULT_GARAGE_OFFSET)
+        if 'garage-anchor-offset' in data:
+            self.garageOffset = _toOffsetList(data['garage-anchor-offset'], _DEFAULT_GARAGE_OFFSET)
         else:
             missing = True
         return missing
@@ -417,8 +424,8 @@ class _Config(object):
             data = {}
             for token, param in g_configParams.items().items():
                 data[token] = param.value
-            data['battle-offset'] = list(self.battleOffset)
-            data['garage-offset'] = list(self.garageOffset)
+            data['battle-anchor-offset'] = list(self.battleOffset)
+            data['garage-anchor-offset'] = list(self.garageOffset)
             _saveJsonFile(_CONFIG_PATH, data, self._configEncoding)
         except Exception as e:
             logger.error('[Config] Save failed: %s', e)
@@ -485,7 +492,7 @@ _loadLocalization()
 g_config = _Config()
 
 
-def _buildPayload(mode, size, visible):
+def _buildPayload(mode, visible):
     p = g_configParams
     return json.dumps({
         'mode': mode,
@@ -494,8 +501,7 @@ def _buildPayload(mode, size, visible):
         'format': '24' if p.use24h.value else '12',
         'showSeconds': bool(p.showSeconds.value),
         'days': _dayNames(),
-        'w': size[0],
-        'h': size[1],
+        'scale': _interfaceScale(),
     }, ensure_ascii=False)
 
 
@@ -504,12 +510,13 @@ if _GF_OK:
     class _ClockModel(ViewModel):
         def __init__(self, payload):
             self._payload = payload
-            super(_ClockModel, self).__init__(properties=1, commands=1)
+            super(_ClockModel, self).__init__(properties=1, commands=2)
 
         def _initialize(self):
             super(_ClockModel, self)._initialize()
             self._addStringProperty('payload', self._payload)
             self.onReady = self._addCommand('onReady')
+            self.onCmd = self._addCommand('onCmd')
 
         def setPayload(self, value):
             self._setString(0, value)
@@ -523,7 +530,18 @@ if _GF_OK:
             super(_ClockView, self).__init__(settings)
 
         def _getEvents(self):
-            return ((self.getViewModel().onReady, self._owner._onReady),)
+            model = self.getViewModel()
+            return (
+                (model.onReady, self._owner._onReady),
+                (model.onCmd, self._onCmd),
+            )
+
+        @args2params(str, str)
+        def _onCmd(self, name, value):
+            try:
+                self._owner._onCommand(name, value)
+            except Exception:
+                logger.exception('[Watch] command %s failed', name)
 
         def _finalize(self):
             self._owner._setModel(None)
@@ -535,10 +553,11 @@ if _GF_OK:
             super(_ClockWindow, self).__init__(WindowFlags.WINDOW, content=content, layer=WindowLayer.OVERLAY, name=name, parent=parent)
 
     class _ClockOverlay(object):
-        def __init__(self, name, mode, size, getOffset, setOffset, getDefault):
+        def __init__(self, name, mode, size, anchorFn, getOffset, setOffset, getDefault):
             self._name = name
             self._mode = mode
-            self._w, self._h = _clockSize(mode)
+            self._viewSize = (max(1, int(size[0])), max(1, int(size[1])))
+            self._anchorFn = anchorFn
             self._getOffset = getOffset
             self._setOffset = setOffset
             self._getDefault = getDefault
@@ -550,7 +569,8 @@ if _GF_OK:
             self._destroyed = False
             self._active = False
             self._visible = True
-            self._position = list(getDefault())
+            self._offset = list(getDefault())
+            self._position = [0, 0]
             self._positionLoaded = False
             self._positionDirty = False
             self._lastSaved = None
@@ -559,21 +579,15 @@ if _GF_OK:
             self._dragStartCursor = None
             self._dragStartPosition = None
             self._dragCallbackID = None
+            self._guiResetterBound = False
+            self._resizeCallbackID = None
+            self._scaleBound = False
 
         def layoutID(self):
             return self._layout()
 
         def buildPayload(self):
-            self._syncSize()
-            return _buildPayload(self._mode, (self._w, self._h), self._visible)
-
-        def _syncSize(self):
-            width, height = _clockSize(self._mode)
-            if width == self._w and height == self._h:
-                return False
-            self._w = width
-            self._h = height
-            return True
+            return _buildPayload(self._mode, self._visible)
 
         def enable(self):
             self._destroyed = False
@@ -583,12 +597,14 @@ if _GF_OK:
             self._active = True
             self._visible = True
             self._loadPosition()
+            self._bindScaleListener()
             self._ensureWindow()
             self._startDragTicker()
 
         def disable(self):
             self._active = False
             self._stopDragTicker()
+            self._unbindScaleListener()
             self._flushPosition()
             self._destroyed = True
             self._dropWindow()
@@ -611,22 +627,30 @@ if _GF_OK:
         def publish(self):
             if self._model is None:
                 return
-            sizeChanged = self._syncSize()
-            payload = _buildPayload(self._mode, (self._w, self._h), self._visible)
+            payload = _buildPayload(self._mode, self._visible)
             try:
                 with self._model.transaction() as model:
                     model.setPayload(payload)
             except Exception:
                 pass
-            if sizeChanged:
-                self._move()
 
         def _onReady(self, *args):
             self._nativeReady = True
             self.publish()
-            self._move()
+            self._syncPosition()
+            self._bindGuiResetter()
+
+        def _onCommand(self, name, value):
+            if name == 'onSize':
+                try:
+                    parts = unicode(value).split(u'x')
+                    self._viewSize = (max(1, int(float(parts[0]))), max(1, int(float(parts[1]))))
+                except Exception:
+                    return
+                self._syncPosition()
 
         def _onViewFinalized(self):
+            self._unbindGuiResetter()
             self._window = None
             self._model = None
             self._nativeReady = False
@@ -665,6 +689,7 @@ if _GF_OK:
                 self._window = None
 
         def _dropWindow(self):
+            self._unbindGuiResetter()
             self._token += 1
             if self._window is not None:
                 try:
@@ -675,14 +700,101 @@ if _GF_OK:
             self._model = None
             self._nativeReady = False
 
+        def _windowScale(self):
+            window = self._window
+            if window is None:
+                return (1.0, 1.0)
+            try:
+                nativeW, nativeH = window.size[:2]
+                nativeW = float(nativeW)
+                nativeH = float(nativeH)
+            except Exception:
+                return (1.0, 1.0)
+            viewW, viewH = self._viewSize
+            if nativeW <= 10 or nativeH <= 10 or viewW <= 10 or viewH <= 10:
+                return (1.0, 1.0)
+            scaleW = float(viewW) / nativeW
+            scaleH = float(viewH) / nativeH
+            if abs(scaleW - scaleH) > 0.1 or not 0.4 <= scaleW <= 4.0:
+                return (1.0, 1.0)
+            return (scaleW, scaleH)
+
         def _move(self):
             if self._window is None or not self._nativeReady:
                 return
             self._clampPosition()
+            scaleX, scaleY = self._windowScale()
             try:
-                self._window.move(int(self._position[0]), int(self._position[1]))
+                self._window.move(int(round(self._position[0] / scaleX)), int(round(self._position[1] / scaleY)))
             except Exception:
                 pass
+
+        def _anchor(self):
+            try:
+                return self._anchorFn(self._viewSize)
+            except Exception:
+                return (0, 0)
+
+        def _syncPosition(self):
+            anchorX, anchorY = self._anchor()
+            self._position = [int(anchorX + self._offset[0]), int(anchorY + self._offset[1])]
+            self._move()
+
+        def _syncOffsetFromPosition(self):
+            anchorX, anchorY = self._anchor()
+            self._offset = [int(self._position[0] - anchorX), int(self._position[1] - anchorY)]
+
+        def _bindGuiResetter(self):
+            if self._guiResetterBound or g_guiResetters is None:
+                return
+            g_guiResetters.add(self._onScreenResize)
+            self._guiResetterBound = True
+
+        def _unbindGuiResetter(self):
+            _cancelCallbackSafe(self._resizeCallbackID)
+            self._resizeCallbackID = None
+            if not self._guiResetterBound:
+                return
+            try:
+                g_guiResetters.discard(self._onScreenResize)
+            except Exception:
+                pass
+            self._guiResetterBound = False
+
+        def _onScreenResize(self):
+            if self._destroyed or self._window is None:
+                return
+            self._syncPosition()
+            _cancelCallbackSafe(self._resizeCallbackID)
+            self._resizeCallbackID = BigWorld.callback(0.2, self._resizeResync)
+
+        def _resizeResync(self):
+            self._resizeCallbackID = None
+            if self._destroyed or self._window is None:
+                return
+            self.publish()
+            self._syncPosition()
+
+        def _bindScaleListener(self):
+            if self._scaleBound or ServicesLocator is None:
+                return
+            try:
+                ServicesLocator.settingsCore.interfaceScale.onScaleChanged += self._onScaleChanged
+                self._scaleBound = True
+            except Exception:
+                pass
+
+        def _unbindScaleListener(self):
+            if not self._scaleBound:
+                return
+            self._scaleBound = False
+            try:
+                ServicesLocator.settingsCore.interfaceScale.onScaleChanged -= self._onScaleChanged
+            except Exception:
+                pass
+
+        def _onScaleChanged(self, *args):
+            self.publish()
 
         def _startDragTicker(self):
             if self._dragCallbackID is None:
@@ -731,10 +843,11 @@ if _GF_OK:
             if not self._visible or self._window is None:
                 return False
             left, top = self._position[0], self._position[1]
-            return left <= cursorPos[0] <= left + self._w and top <= cursorPos[1] <= top + self._h
+            width, height = self._viewSize
+            return left <= cursorPos[0] <= left + width and top <= cursorPos[1] <= top + height
 
         def _setPosition(self, x, y):
-            cx, cy = clampCoordinates(x, y, (self._w, self._h), 0, 0)
+            cx, cy = clampCoordinates(x, y, self._viewSize, 0, 0)
             if cx == self._position[0] and cy == self._position[1]:
                 return
             self._position[0] = cx
@@ -743,7 +856,7 @@ if _GF_OK:
             self._move()
 
         def _clampPosition(self):
-            cx, cy = clampCoordinates(self._position[0], self._position[1], (self._w, self._h), 0, 0)
+            cx, cy = clampCoordinates(self._position[0], self._position[1], self._viewSize, 0, 0)
             self._position[0] = cx
             self._position[1] = cy
 
@@ -751,23 +864,24 @@ if _GF_OK:
             if self._positionLoaded:
                 return
             self._positionLoaded = True
-            self._position = list(self._getOffset())
-            self._lastSaved = (self._position[0], self._position[1])
+            self._offset = list(self._getOffset())
+            self._lastSaved = (self._offset[0], self._offset[1])
             self._positionDirty = False
 
         def _flushPosition(self):
             if not self._positionDirty:
                 return
-            current = (self._position[0], self._position[1])
+            self._syncOffsetFromPosition()
+            current = (self._offset[0], self._offset[1])
             if self._lastSaved == current:
                 self._positionDirty = False
                 return
-            self._setOffset([self._position[0], self._position[1]])
+            self._setOffset([self._offset[0], self._offset[1]])
             self._lastSaved = current
             self._positionDirty = False
 
-    def _makeOverlay(name, mode, size, getOffset, setOffset, getDefault):
-        return _ClockOverlay(name, mode, size, getOffset, setOffset, getDefault)
+    def _makeOverlay(name, mode, size, anchorFn, getOffset, setOffset, getDefault):
+        return _ClockOverlay(name, mode, size, anchorFn, getOffset, setOffset, getDefault)
 
 else:
 
@@ -784,14 +898,14 @@ else:
         def refresh(self):
             pass
 
-    def _makeOverlay(name, mode, size, getOffset, setOffset, getDefault):
+    def _makeOverlay(name, mode, size, anchorFn, getOffset, setOffset, getDefault):
         return _NullOverlay()
 
 
 class _BattleClock(object):
     def __init__(self):
         self._overlay = _makeOverlay(
-            _BATTLE_NAME, 'battle', _BATTLE_SIZE,
+            _BATTLE_NAME, 'battle', _BATTLE_SIZE, _battleAnchor,
             lambda: g_config.battleOffset, g_config.setBattleOffset,
             lambda: list(_DEFAULT_BATTLE_OFFSET))
         self._pageReady = False
@@ -886,7 +1000,7 @@ class _BattleClock(object):
 class _GarageClock(object):
     def __init__(self):
         self._overlay = _makeOverlay(
-            _GARAGE_NAME, 'garage', _GARAGE_SIZE,
+            _GARAGE_NAME, 'garage', _GARAGE_SIZE, _garageAnchor,
             lambda: g_config.garageOffset, g_config.setGarageOffset,
             lambda: list(_DEFAULT_GARAGE_OFFSET))
         self._stateMachine = None

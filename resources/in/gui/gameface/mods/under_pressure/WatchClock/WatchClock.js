@@ -6,10 +6,45 @@
     var dateEl = document.getElementById('watch-date');
     var cfg = {};
     var lastPayload = null;
-    var lastSize = null;
+    var lastReportedSize = null;
+    var measureFrame = null;
+    var resizeRetryTimer = null;
 
     function pad(n) {
         return n < 10 ? '0' + n : '' + n;
+    }
+
+    function cmd(name, value) {
+        try {
+            if (window.model && typeof window.model.onCmd === 'function') {
+                window.model.onCmd({ name: String(name), value: String(value) });
+            }
+        } catch (e) {}
+    }
+
+    function uiScale() {
+        try {
+            if (window.viewEnv && viewEnv.remToPx) {
+                var px = viewEnv.remToPx(1);
+                if (px > 0) {
+                    return px;
+                }
+            }
+        } catch (e) {}
+        var payloadScale = parseFloat(cfg.scale);
+        if (payloadScale > 0) {
+            return payloadScale;
+        }
+        var w = document.documentElement.clientWidth || window.innerWidth || 1920;
+        var h = document.documentElement.clientHeight || window.innerHeight || 1080;
+        return Math.min(w / 1920, h / 1080) || 1;
+    }
+
+    function applyScale() {
+        var fontSize = uiScale() + 'px';
+        if (document.documentElement.style.fontSize !== fontSize) {
+            document.documentElement.style.fontSize = fontSize;
+        }
     }
 
     function readConfig() {
@@ -31,20 +66,65 @@
         root.className = 'watch-' + mode;
         dateEl.style.display = mode === 'garage' ? 'block' : 'none';
         timeEl.style.color = '#' + (cfg.color || 'FFFFFF');
-        var width = parseInt(cfg.w, 10) || 1;
-        var height = parseInt(cfg.h, 10) || 1;
-        var size = width + 'x' + height;
-        if (size !== lastSize && window.viewEnv && viewEnv.resizeViewPx) {
-            lastSize = size;
-            viewEnv.resizeViewPx(width, height);
+    }
+
+    function reportSize() {
+        var w = 0;
+        var h = 0;
+        try {
+            var rect = root.getBoundingClientRect();
+            w = rect.width;
+            h = rect.height;
+        } catch (e) {}
+        if (w < 2 || h < 2) {
+            w = root.offsetWidth || 0;
+            h = root.offsetHeight || 0;
         }
+        if (w < 2 || h < 2) {
+            return;
+        }
+        w = Math.max(1, Math.ceil(w));
+        h = Math.max(1, Math.ceil(h));
+        var key = w + 'x' + h;
+        if (key === lastReportedSize) {
+            return;
+        }
+        var applied = false;
+        try {
+            if (window.viewEnv && viewEnv.resizeViewPx) {
+                viewEnv.resizeViewPx(w, h);
+                applied = true;
+            }
+        } catch (e) {}
+        if (!applied) {
+            if (resizeRetryTimer === null) {
+                resizeRetryTimer = window.setTimeout(function () {
+                    resizeRetryTimer = null;
+                    reportSize();
+                }, 250);
+            }
+            return;
+        }
+        lastReportedSize = key;
+        cmd('onSize', key);
+    }
+
+    function scheduleMeasure() {
+        if (measureFrame !== null) {
+            return;
+        }
+        measureFrame = requestAnimationFrame(function () {
+            measureFrame = null;
+            reportSize();
+        });
     }
 
     function render() {
         var hidden = cfg.visible === false;
-        root.style.display = hidden ? 'none' : 'block';
-        if (hidden) {
-            return;
+        if (root.classList) {
+            root.classList.toggle('watch-hidden', hidden);
+        } else {
+            root.style.visibility = hidden ? 'hidden' : 'visible';
         }
         var now = new Date();
         var h = now.getHours();
@@ -70,14 +150,17 @@
 
     function tick() {
         readConfig();
+        applyScale();
         render();
+        scheduleMeasure();
     }
 
     function initialize() {
-        readConfig();
-        render();
+        tick();
         if (window.engine) {
             window.engine.on('viewEnv.onDataChanged', tick);
+            window.engine.on('self.onScaleUpdated', tick);
+            window.engine.on('clientResized', tick);
         }
         window.setInterval(tick, 1000);
         if (window.model && typeof window.model.onReady === 'function') {
