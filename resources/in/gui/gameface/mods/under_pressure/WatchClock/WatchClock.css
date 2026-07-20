@@ -14,7 +14,11 @@ html, body {
 }
 
 #watch-root {
-    display: inline-block;
+    /* Cohtml не парсить inline-block ("Unable to parse declaration") — тоді
+       #watch-root падає в block зі «розтягнутою» шириною, що робить розмір
+       в'юхи невизначеним і дає "Size calculation timeout". Тримаємо block із
+       фіксованим розміром (класи watch-garage/watch-battle нижче). */
+    display: block;
     padding: 0;
     overflow: hidden;
     white-space: nowrap;
@@ -28,18 +32,16 @@ html, body {
     visibility: hidden;
 }
 
-/* min-width/min-height: fallback intrinsic size so the engine's view size
-   calculation never sees a 0x0 layout before JS/model bindings are ready. */
 #watch-root.watch-garage {
     text-align: right;
-    min-width: 170rem;
-    min-height: 50rem;
+    width: 170rem;
+    height: 50rem;
 }
 
 #watch-root.watch-battle {
     text-align: right;
-    min-width: 112rem;
-    min-height: 30rem;
+    width: 112rem;
+    height: 30rem;
 }
 
 #watch-time {
