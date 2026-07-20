@@ -687,6 +687,13 @@ if _GF_OK:
             except Exception:
                 logger.exception('[Watch] Failed to load overlay %s', self._name)
                 self._window = None
+                return
+            try:
+                resize = getattr(self._window, 'resize', None)
+                if callable(resize):
+                    resize(self._viewSize[0], self._viewSize[1])
+            except Exception:
+                logger.debug('[Watch] Default resize not applied for %s', self._name)
 
         def _dropWindow(self):
             self._unbindGuiResetter()

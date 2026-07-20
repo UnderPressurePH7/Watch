@@ -3,8 +3,6 @@ html {
 }
 
 html, body {
-    width: 100%;
-    height: 100%;
     margin: 0;
     padding: 0;
     overflow: hidden;
@@ -30,12 +28,18 @@ html, body {
     visibility: hidden;
 }
 
+/* min-width/min-height: fallback intrinsic size so the engine's view size
+   calculation never sees a 0x0 layout before JS/model bindings are ready. */
 #watch-root.watch-garage {
     text-align: right;
+    min-width: 170rem;
+    min-height: 50rem;
 }
 
 #watch-root.watch-battle {
     text-align: right;
+    min-width: 112rem;
+    min-height: 30rem;
 }
 
 #watch-time {

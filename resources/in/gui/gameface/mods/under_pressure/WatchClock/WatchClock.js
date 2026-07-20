@@ -62,7 +62,9 @@
     }
 
     function applyConfig() {
-        var mode = cfg.mode === 'battle' ? 'battle' : 'garage';
+        var mode = cfg.mode === 'battle' || cfg.mode === 'garage'
+            ? cfg.mode
+            : (root.className.indexOf('battle') !== -1 ? 'battle' : 'garage');
         root.className = 'watch-' + mode;
         dateEl.style.display = mode === 'garage' ? 'block' : 'none';
         timeEl.style.color = '#' + (cfg.color || 'FFFFFF');
