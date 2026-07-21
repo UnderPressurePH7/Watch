@@ -2,6 +2,7 @@
     'use strict';
     var DEFAULT_DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
     var root = document.getElementById('watch-root');
+    var content = document.getElementById('watch-content');
     var timeEl = document.getElementById('watch-time');
     var dateEl = document.getElementById('watch-date');
     var cfg = {};
@@ -74,19 +75,23 @@
         var w = 0;
         var h = 0;
         try {
-            var rect = root.getBoundingClientRect();
+            var rect = content.getBoundingClientRect();
             w = rect.width;
             h = rect.height;
         } catch (e) {}
         if (w < 2 || h < 2) {
-            w = root.offsetWidth || 0;
-            h = root.offsetHeight || 0;
+            w = content.offsetWidth || 0;
+            h = content.offsetHeight || 0;
         }
         if (w < 2 || h < 2) {
             return;
         }
         w = Math.max(1, Math.ceil(w));
         h = Math.max(1, Math.ceil(h));
+        // Pin the root to the measured content box so the view has no dead
+        // space and can sit flush against any screen edge.
+        root.style.width = w + 'px';
+        root.style.height = h + 'px';
         var key = w + 'x' + h;
         if (key === lastReportedSize) {
             return;

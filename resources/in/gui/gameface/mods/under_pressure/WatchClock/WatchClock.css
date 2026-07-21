@@ -3,6 +3,11 @@ html {
 }
 
 html, body {
+    display: flex;
+    align-items: flex-start;
+    justify-content: flex-start;
+    width: 100%;
+    height: 100%;
     margin: 0;
     padding: 0;
     overflow: hidden;
@@ -11,15 +16,21 @@ html, body {
 
 * {
     box-sizing: border-box;
+    min-width: 0;
+    min-height: 0;
 }
 
+/* The root is pinned to an explicit px size by the JS after it measures
+   #watch-content (Cohtml can't parse inline-block, so we hug the content with
+   flexbox instead of an auto-sized block). Sizing the view tightly to the
+   content — like MainGun — lets the panel sit flush against any screen edge. */
 #watch-root {
-    /* Cohtml не парсить inline-block ("Unable to parse declaration") — тоді
-       #watch-root падає в block зі «розтягнутою» шириною, що робить розмір
-       в'юхи невизначеним і дає "Size calculation timeout". Тримаємо block із
-       фіксованим розміром (класи watch-garage/watch-battle нижче). */
-    display: block;
-    padding: 0;
+    display: flex;
+    flex: none;
+    flex-direction: column;
+    align-items: flex-end;
+    width: 1rem;
+    height: 1rem;
     overflow: hidden;
     white-space: nowrap;
     font-family: Arial, "Helvetica Neue", Helvetica, sans-serif;
@@ -32,26 +43,24 @@ html, body {
     visibility: hidden;
 }
 
-#watch-root.watch-garage {
-    text-align: right;
-    width: 170rem;
-    height: 50rem;
-}
-
-#watch-root.watch-battle {
-    text-align: right;
-    width: 112rem;
-    height: 30rem;
+#watch-content {
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    white-space: nowrap;
 }
 
 #watch-time {
     color: #FFFFFF;
     line-height: 1.1;
+    white-space: nowrap;
 }
 
 #watch-date {
     color: #8899AA;
     line-height: 1.1;
+    white-space: nowrap;
 }
 
 #watch-root.watch-battle #watch-time {

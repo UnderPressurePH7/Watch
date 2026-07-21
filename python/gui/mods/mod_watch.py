@@ -18,7 +18,7 @@ except Exception:
 logger = logging.getLogger('Watch')
 logger.setLevel(logging.DEBUG if os.path.isfile('.debug_mods') else logging.ERROR)
 
-__version__ = '0.2.0'
+__version__ = '0.2.1'
 __author__ = 'Under_Pressure'
 
 _GF_OK = True
@@ -51,6 +51,11 @@ except Exception:
     SharedPage = None
 
 try:
+    from gui.Scaleform.daapi.view.battle.shared.ingame_menu import IngameMenu
+except Exception:
+    IngameMenu = None
+
+try:
     from gui.impl.lobby.hangar.states import DefaultHangarState, LegacyHangarState
 except Exception:
     DefaultHangarState = LegacyHangarState = None
@@ -63,7 +68,7 @@ _UTF8_BOM = '\xef\xbb\xbf'
 
 
 _DEFAULT_BATTLE_OFFSET = [-32, 8]
-_DEFAULT_GARAGE_OFFSET = [-100, 60]
+_DEFAULT_GARAGE_OFFSET = [0, 60]
 
 _BATTLE_NAME = 'WatchBattle'
 _GARAGE_NAME = 'WatchGarage'
@@ -71,7 +76,8 @@ _GARAGE_NAME = 'WatchGarage'
 _BATTLE_SIZE = (112, 30)
 _GARAGE_SIZE = (170, 50)
 
-_RIGHT_EDGE_GRAB_WIDTH = 12
+_GARAGE_BOTTOM_MARGIN = 100
+_GARAGE_EDGE_SNAP = 10
 
 _BASE_SCREEN = (1920, 1080)
 
@@ -89,6 +95,8 @@ _HANGAR_STATE_CLASS_PATHS = (
     'gui.impl.lobby.hangar.states.HangarState',
     'comp7.gui.impl.lobby.hangar.states.Comp7HangarState',
     'comp7.gui.impl.lobby.hangar.states.Comp7RootHangarState',
+    'comp7_light.gui.impl.lobby.hangar.states.Comp7LightHangarState',
+    'comp7_light.gui.impl.lobby.hangar.states.Comp7LightRootHangarState',
     'fun_random.gui.impl.lobby.hangar.states.FunRandomHangarState',
     'fun_random.gui.impl.lobby.hangar.states.DefaultFunRandomHangarState',
     'battle_royale.gui.impl.lobby.views.states.BattleRoyaleHangarState',
@@ -243,14 +251,12 @@ def _interfaceScale():
     return 1.0
 
 
-def clampCoordinates(xPos, yPos, size, padX=0, padY=0, rightGrabWidth=None):
+def clampCoordinates(xPos, yPos, size, padX=0, padY=0, padBottom=None):
+    if padBottom is None:
+        padBottom = padY
     screenWidth, screenHeight = _screenResolution()
-    if rightGrabWidth is None:
-        maxX = max(padX, screenWidth - size[0] - padX)
-    else:
-        grabWidth = max(1, min(int(rightGrabWidth), int(size[0])))
-        maxX = max(padX, screenWidth - grabWidth - padX)
-    maxY = max(padY, screenHeight - size[1] - padY)
+    maxX = max(padX, screenWidth - size[0] - padX)
+    maxY = max(padY, screenHeight - size[1] - padBottom)
     clampedX = max(padX, min(int(round(xPos)), maxX))
     clampedY = max(padY, min(int(round(yPos)), maxY))
     return (clampedX, clampedY)
@@ -555,8 +561,11 @@ if _GF_OK:
             self._owner._onViewFinalized()
 
     class _ClockWindow(WindowImpl):
-        def __init__(self, content, parent, name):
-            super(_ClockWindow, self).__init__(WindowFlags.WINDOW, content=content, layer=WindowLayer.OVERLAY, name=name, parent=parent)
+        def __init__(self, content, parent, name, layer):
+            super(_ClockWindow, self).__init__(WindowFlags.WINDOW, content=content, layer=layer, name=name, parent=parent)
+
+        def _onReady(self):
+            self.show(focus=False)
 
     class _ClockOverlay(object):
         def __init__(self, name, mode, size, anchorFn, getOffset, setOffset, getDefault):
@@ -588,9 +597,17 @@ if _GF_OK:
             self._guiResetterBound = False
             self._resizeCallbackID = None
             self._scaleBound = False
+            self._suspended = False
 
         def layoutID(self):
             return self._layout()
+
+        def _windowLayer(self):
+            # Both overlays sit on the WINDOW layer, below the lobby/battle
+            # escape menus, so they never intercept ESC. This mirrors MainGun's
+            # battle panel; OVERLAY (higher than the menus) was what let the
+            # second ESC land on the clock instead of closing the menu.
+            return getattr(WindowLayer, 'WINDOW', WindowLayer.OVERLAY)
 
         def buildPayload(self):
             return _buildPayload(self._mode, self._visible)
@@ -609,11 +626,29 @@ if _GF_OK:
 
         def disable(self):
             self._active = False
+            self._suspended = False
             self._stopDragTicker()
             self._unbindScaleListener()
             self._flushPosition()
             self._destroyed = True
             self._dropWindow()
+
+        def suspend(self):
+            # Temporarily tear down the native window (e.g. while the in-battle
+            # escape menu is open) so this overlay stops sitting on top of the
+            # battle app and intercepting the ESC that should close the menu.
+            if self._suspended:
+                return
+            self._suspended = True
+            self._flushPosition()
+            self._dropWindow()
+
+        def resume(self):
+            if not self._suspended:
+                return
+            self._suspended = False
+            if self._active and not self._destroyed:
+                self._ensureWindow()
 
         def setVisible(self, value):
             value = bool(value)
@@ -661,11 +696,11 @@ if _GF_OK:
             self._model = None
             self._nativeReady = False
             self._token += 1
-            if self._active and not self._destroyed:
+            if self._active and not self._destroyed and not self._suspended:
                 BigWorld.callback(0.1, self._ensureWindow)
 
         def _ensureWindow(self):
-            if self._destroyed or self._window is not None:
+            if self._destroyed or self._suspended or self._window is not None:
                 return
             if gamefaceResMap is None:
                 return
@@ -688,19 +723,12 @@ if _GF_OK:
                     BigWorld.callback(0.1, lambda: self._load(token, retry + 1))
                 return
             try:
-                windowParent = None if self._mode == 'garage' else parent
-                self._window = _ClockWindow(_ClockView(self), windowParent, self._name)
+                self._window = _ClockWindow(_ClockView(self), parent, self._name, self._windowLayer())
                 self._window.load()
             except Exception:
                 logger.exception('[Watch] Failed to load overlay %s', self._name)
                 self._window = None
                 return
-            try:
-                resize = getattr(self._window, 'resize', None)
-                if callable(resize):
-                    resize(self._viewSize[0], self._viewSize[1])
-            except Exception:
-                logger.debug('[Watch] Default resize not applied for %s', self._name)
 
         def _dropWindow(self):
             self._unbindGuiResetter()
@@ -714,32 +742,16 @@ if _GF_OK:
             self._model = None
             self._nativeReady = False
 
-        def _windowScale(self):
-            window = self._window
-            if window is None:
-                return (1.0, 1.0)
-            try:
-                nativeW, nativeH = window.size[:2]
-                nativeW = float(nativeW)
-                nativeH = float(nativeH)
-            except Exception:
-                return (1.0, 1.0)
-            viewW, viewH = self._viewSize
-            if nativeW <= 10 or nativeH <= 10 or viewW <= 10 or viewH <= 10:
-                return (1.0, 1.0)
-            scaleW = float(viewW) / nativeW
-            scaleH = float(viewH) / nativeH
-            if abs(scaleW - scaleH) > 0.1 or not 0.4 <= scaleW <= 4.0:
-                return (1.0, 1.0)
-            return (scaleW, scaleH)
-
         def _move(self):
             if self._window is None or not self._nativeReady:
                 return
             self._clampPosition()
-            scaleX, scaleY = self._windowScale()
             try:
-                self._window.move(int(round(self._position[0] / scaleX)), int(round(self._position[1] / scaleY)))
+                # Raw device pixels: the view is sized via viewEnv.resizeViewPx
+                # (in JS) to its on-screen pixel size, and onSize reports that
+                # same size, so _position and _viewSize are already in the
+                # window's coordinate space. No scale conversion needed.
+                self._window.move(int(self._position[0]), int(self._position[1]))
             except Exception:
                 pass
 
@@ -750,13 +762,31 @@ if _GF_OK:
                 return (0, 0)
 
         def _syncPosition(self):
-            anchorX, anchorY = self._anchor()
-            self._position = [int(anchorX + self._offset[0]), int(anchorY + self._offset[1])]
+            if self._mode == 'battle':
+                # MainGun-style corner-relative anchoring: a non-negative offset
+                # is measured from the left/top edge, a negative one from the
+                # right/bottom edge, so the panel stays glued to its nearest
+                # corner across resolution and windowed<->fullscreen changes.
+                screenWidth, screenHeight = _screenResolution()
+                offsetX, offsetY = self._offset[0], self._offset[1]
+                self._position = [int(offsetX if offsetX >= 0 else screenWidth + offsetX),
+                                  int(offsetY if offsetY >= 0 else screenHeight + offsetY)]
+            else:
+                anchorX, anchorY = self._anchor()
+                self._position = [int(anchorX + self._offset[0]), int(anchorY + self._offset[1])]
             self._move()
 
         def _syncOffsetFromPosition(self):
-            anchorX, anchorY = self._anchor()
-            self._offset = [int(self._position[0] - anchorX), int(self._position[1] - anchorY)]
+            if self._mode == 'battle':
+                screenWidth, screenHeight = _screenResolution()
+                xPos, yPos = int(self._position[0]), int(self._position[1])
+                width, height = self._viewSize
+                offsetX = xPos if (xPos + width * 0.5) < screenWidth * 0.5 else xPos - screenWidth
+                offsetY = yPos if (yPos + height * 0.5) < screenHeight * 0.5 else yPos - screenHeight
+                self._offset = [int(offsetX), int(offsetY)]
+            else:
+                anchorX, anchorY = self._anchor()
+                self._offset = [int(self._position[0] - anchorX), int(self._position[1] - anchorY)]
 
         def _bindGuiResetter(self):
             if self._guiResetterBound or g_guiResetters is None:
@@ -827,7 +857,10 @@ if _GF_OK:
             if not self._active:
                 return
             if self._window is not None:
-                self._handleMouseDrag()
+                try:
+                    self._handleMouseDrag()
+                except Exception:
+                    logger.exception('[Watch] drag tick failed for %s', self._name)
             self._dragCallbackID = BigWorld.callback(0.0, self._updateDragState)
 
         def _handleMouseDrag(self):
@@ -839,7 +872,13 @@ if _GF_OK:
             mouseDown = BigWorld.isKeyDown(Keys.KEY_LEFTMOUSE)
             cursorPos = _cursorPixels(cursor)
             if mouseDown and not self._mouseWasDown:
-                if self._isCursorOver(cursorPos):
+                over = self._isCursorOver(cursorPos)
+                if logger.isEnabledFor(logging.DEBUG):
+                    nativeSize = getattr(self._window, 'size', None)
+                    logger.debug('[Watch:%s] press cursor=%s pos=%s viewSize=%s nativeSize=%s over=%s',
+                                 self._name, cursorPos, tuple(self._position), self._viewSize,
+                                 nativeSize, over)
+                if over:
                     self._dragging = True
                     self._dragStartCursor = cursorPos
                     self._dragStartPosition = tuple(self._position)
@@ -860,10 +899,29 @@ if _GF_OK:
             width, height = self._viewSize
             return left <= cursorPos[0] <= left + width and top <= cursorPos[1] <= top + height
 
+        def _bottomMargin(self):
+            return _GARAGE_BOTTOM_MARGIN if self._mode == 'garage' else 0
+
+        def _applyEdgeSnap(self, x, y):
+            # Magnetically pull the panel flush against the left/right/top edge
+            # when released/dragged within the snap distance. The bottom edge is
+            # intentionally excluded so its clearance margin is preserved.
+            threshold = _GARAGE_EDGE_SNAP if self._mode == 'garage' else 0
+            if threshold <= 0:
+                return (x, y)
+            screenWidth, _ = _screenResolution()
+            width = self._viewSize[0]
+            if x <= threshold:
+                x = 0
+            elif x + width >= screenWidth - threshold:
+                x = screenWidth - width
+            if y <= threshold:
+                y = 0
+            return (x, y)
+
         def _setPosition(self, x, y):
-            cx, cy = clampCoordinates(
-                x, y, self._viewSize, 0, 0,
-                max(4, int(round(_RIGHT_EDGE_GRAB_WIDTH * _interfaceScale()))))
+            x, y = self._applyEdgeSnap(x, y)
+            cx, cy = clampCoordinates(x, y, self._viewSize, 0, 0, self._bottomMargin())
             if cx == self._position[0] and cy == self._position[1]:
                 return
             self._position[0] = cx
@@ -872,9 +930,7 @@ if _GF_OK:
             self._move()
 
         def _clampPosition(self):
-            cx, cy = clampCoordinates(
-                self._position[0], self._position[1], self._viewSize, 0, 0,
-                max(4, int(round(_RIGHT_EDGE_GRAB_WIDTH * _interfaceScale()))))
+            cx, cy = clampCoordinates(self._position[0], self._position[1], self._viewSize, 0, 0, self._bottomMargin())
             self._position[0] = cx
             self._position[1] = cy
 
@@ -916,6 +972,12 @@ else:
         def refresh(self):
             pass
 
+        def suspend(self):
+            pass
+
+        def resume(self):
+            pass
+
     def _makeOverlay(name, mode, size, anchorFn, getOffset, setOffset, getDefault):
         return _NullOverlay()
 
@@ -948,6 +1010,12 @@ class _BattleClock(object):
         self._unbindGUI()
         self._unbindConfig()
         self._overlay.disable()
+
+    def suspend(self):
+        self._overlay.suspend()
+
+    def resume(self):
+        self._overlay.resume()
 
     def fini(self):
         self.onBattlePageDisposed()
