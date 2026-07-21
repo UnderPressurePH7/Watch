@@ -71,6 +71,8 @@ _GARAGE_NAME = 'WatchGarage'
 _BATTLE_SIZE = (112, 30)
 _GARAGE_SIZE = (170, 50)
 
+_RIGHT_EDGE_GRAB_WIDTH = 12
+
 _BASE_SCREEN = (1920, 1080)
 
 MOD_LINKAGE = 'me.under_pressure.watch'
@@ -241,9 +243,13 @@ def _interfaceScale():
     return 1.0
 
 
-def clampCoordinates(xPos, yPos, size, padX=0, padY=0):
+def clampCoordinates(xPos, yPos, size, padX=0, padY=0, rightGrabWidth=None):
     screenWidth, screenHeight = _screenResolution()
-    maxX = max(padX, screenWidth - size[0] - padX)
+    if rightGrabWidth is None:
+        maxX = max(padX, screenWidth - size[0] - padX)
+    else:
+        grabWidth = max(1, min(int(rightGrabWidth), int(size[0])))
+        maxX = max(padX, screenWidth - grabWidth - padX)
     maxY = max(padY, screenHeight - size[1] - padY)
     clampedX = max(padX, min(int(round(xPos)), maxX))
     clampedY = max(padY, min(int(round(yPos)), maxY))
@@ -682,7 +688,8 @@ if _GF_OK:
                     BigWorld.callback(0.1, lambda: self._load(token, retry + 1))
                 return
             try:
-                self._window = _ClockWindow(_ClockView(self), parent, self._name)
+                windowParent = None if self._mode == 'garage' else parent
+                self._window = _ClockWindow(_ClockView(self), windowParent, self._name)
                 self._window.load()
             except Exception:
                 logger.exception('[Watch] Failed to load overlay %s', self._name)
@@ -854,7 +861,9 @@ if _GF_OK:
             return left <= cursorPos[0] <= left + width and top <= cursorPos[1] <= top + height
 
         def _setPosition(self, x, y):
-            cx, cy = clampCoordinates(x, y, self._viewSize, 0, 0)
+            cx, cy = clampCoordinates(
+                x, y, self._viewSize, 0, 0,
+                max(4, int(round(_RIGHT_EDGE_GRAB_WIDTH * _interfaceScale()))))
             if cx == self._position[0] and cy == self._position[1]:
                 return
             self._position[0] = cx
@@ -863,7 +872,9 @@ if _GF_OK:
             self._move()
 
         def _clampPosition(self):
-            cx, cy = clampCoordinates(self._position[0], self._position[1], self._viewSize, 0, 0)
+            cx, cy = clampCoordinates(
+                self._position[0], self._position[1], self._viewSize, 0, 0,
+                max(4, int(round(_RIGHT_EDGE_GRAB_WIDTH * _interfaceScale()))))
             self._position[0] = cx
             self._position[1] = cy
 
