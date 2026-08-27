@@ -18,7 +18,7 @@ except Exception:
 logger = logging.getLogger('Watch')
 logger.setLevel(logging.DEBUG if os.path.isfile('.debug_mods') else logging.ERROR)
 
-__version__ = '0.2.1'
+__version__ = '0.2.2'
 __author__ = 'Under_Pressure'
 
 _GF_OK = True
@@ -68,7 +68,15 @@ _UTF8_BOM = '\xef\xbb\xbf'
 
 
 _DEFAULT_BATTLE_OFFSET = [-32, 8]
-_DEFAULT_GARAGE_OFFSET = [0, 60]
+_DEFAULT_GARAGE_OFFSET = [-32, 60]
+
+_ANCHOR_SCHEME = 2
+
+_GRAB_PAD = 4
+_DRAG_THRESHOLD = 6
+_DRAG_TICK_ACTIVE = 0.0
+_DRAG_TICK_HOVER = 0.03
+_DRAG_TICK_IDLE = 0.05
 
 _BATTLE_NAME = 'WatchBattle'
 _GARAGE_NAME = 'WatchGarage'
@@ -225,7 +233,10 @@ def _saveJsonFile(path, data, encoding):
         f.write(raw)
 
 
-def _screenResolution():
+_screenResolutionCache = None
+
+
+def _probeScreenResolution():
     try:
         if GUI is not None:
             width, height = GUI.screenResolution()[:2]
@@ -239,7 +250,32 @@ def _screenResolution():
             return (int(width), int(height))
     except Exception:
         pass
-    return _BASE_SCREEN
+    return None
+
+
+def _screenResolution():
+    global _screenResolutionCache
+    if _screenResolutionCache is not None:
+        return _screenResolutionCache
+    probed = _probeScreenResolution()
+    if probed is None:
+        return _BASE_SCREEN
+    _screenResolutionCache = probed
+    return probed
+
+
+def _invalidateScreenResolution():
+    global _screenResolutionCache
+    _screenResolutionCache = None
+
+
+def _installScreenResolutionWatcher():
+    if g_guiResetters is None:
+        return
+    try:
+        g_guiResetters.add(_invalidateScreenResolution)
+    except Exception:
+        pass
 
 
 def _interfaceScale():
@@ -268,16 +304,6 @@ def _cursorPixels(cursor):
     pixelX = int((normX + 1.0) * 0.5 * screenWidth)
     pixelY = int((1.0 - normY) * 0.5 * screenHeight)
     return (pixelX, pixelY)
-
-
-def _battleAnchor(viewSize):
-    screenWidth, _ = _screenResolution()
-    return (int(screenWidth * 0.5 - viewSize[0] * 0.5), 0)
-
-
-def _garageAnchor(viewSize):
-    screenWidth, _ = _screenResolution()
-    return (int(screenWidth - viewSize[0]), 0)
 
 
 def _createTooltip(header=None, body=None):
@@ -371,6 +397,8 @@ class _Config(object):
         self._finalized = False
         self.battleOffset = list(_DEFAULT_BATTLE_OFFSET)
         self.garageOffset = list(_DEFAULT_GARAGE_OFFSET)
+        self.legacyBattle = False
+        self.legacyGarage = False
         self._configEncoding = _CONFIG_ENCODING_UTF8
         self._loadConfig()
         self._registerMod()
@@ -381,16 +409,18 @@ class _Config(object):
 
     def setBattleOffset(self, offset):
         new = _toOffsetList(offset, _DEFAULT_BATTLE_OFFSET)
-        if new == self.battleOffset:
+        if new == self.battleOffset and not self.legacyBattle:
             return
         self.battleOffset = new
+        self.legacyBattle = False
         self._saveConfig()
 
     def setGarageOffset(self, offset):
         new = _toOffsetList(offset, _DEFAULT_GARAGE_OFFSET)
-        if new == self.garageOffset:
+        if new == self.garageOffset and not self.legacyGarage:
             return
         self.garageOffset = new
+        self.legacyGarage = False
         self._saveConfig()
 
     def _applyData(self, data):
@@ -404,12 +434,22 @@ class _Config(object):
             else:
                 missing = True
 
+        try:
+            scheme = int(data.get('anchor-scheme', 1))
+        except (TypeError, ValueError):
+            scheme = 1
+        legacy = scheme != _ANCHOR_SCHEME
+        if legacy:
+            missing = True
+
         if 'battle-anchor-offset' in data:
             self.battleOffset = _toOffsetList(data['battle-anchor-offset'], _DEFAULT_BATTLE_OFFSET)
+            self.legacyBattle = legacy
         else:
             missing = True
         if 'garage-anchor-offset' in data:
             self.garageOffset = _toOffsetList(data['garage-anchor-offset'], _DEFAULT_GARAGE_OFFSET)
+            self.legacyGarage = legacy
         else:
             missing = True
         return missing
@@ -438,6 +478,7 @@ class _Config(object):
                 data[token] = param.value
             data['battle-anchor-offset'] = list(self.battleOffset)
             data['garage-anchor-offset'] = list(self.garageOffset)
+            data['anchor-scheme'] = _ANCHOR_SCHEME
             _saveJsonFile(_CONFIG_PATH, data, self._configEncoding)
         except Exception as e:
             logger.error('[Config] Save failed: %s', e)
@@ -522,16 +563,20 @@ if _GF_OK:
     class _ClockModel(ViewModel):
         def __init__(self, payload):
             self._payload = payload
-            super(_ClockModel, self).__init__(properties=1, commands=2)
+            super(_ClockModel, self).__init__(properties=2, commands=2)
 
         def _initialize(self):
             super(_ClockModel, self)._initialize()
             self._addStringProperty('payload', self._payload)
+            self._addStringProperty('shift', '0,0')
             self.onReady = self._addCommand('onReady')
             self.onCmd = self._addCommand('onCmd')
 
         def setPayload(self, value):
             self._setString(0, value)
+
+        def setShift(self, value):
+            self._setString(1, value)
 
     class _ClockView(ViewImpl):
         def __init__(self, owner):
@@ -568,14 +613,15 @@ if _GF_OK:
             self.show(focus=False)
 
     class _ClockOverlay(object):
-        def __init__(self, name, mode, size, anchorFn, getOffset, setOffset, getDefault):
+        def __init__(self, name, mode, size, getOffset, setOffset, getDefault, getLegacy):
             self._name = name
             self._mode = mode
             self._viewSize = (max(1, int(size[0])), max(1, int(size[1])))
-            self._anchorFn = anchorFn
+            self._viewPad = 0
             self._getOffset = getOffset
             self._setOffset = setOffset
             self._getDefault = getDefault
+            self._getLegacy = getLegacy
             self._layout = ModDynAccessor('mods/under_pressure/%s/layoutID' % name)
             self._window = None
             self._model = None
@@ -588,14 +634,23 @@ if _GF_OK:
             self._position = [0, 0]
             self._positionLoaded = False
             self._positionDirty = False
+            self._legacyOffset = False
+            self._sizeConfirmed = False
             self._lastSaved = None
+            self._lastMove = None
+            self._shift = [0, 0]
+            self._stableScale = None
+            self._scaleSample = None
+            self._loggedState = None
             self._dragging = False
+            self._dragMoved = False
             self._mouseWasDown = False
             self._dragStartCursor = None
             self._dragStartPosition = None
             self._dragCallbackID = None
             self._guiResetterBound = False
             self._resizeCallbackID = None
+            self._sizeSyncCallbackID = None
             self._scaleBound = False
             self._suspended = False
 
@@ -631,6 +686,7 @@ if _GF_OK:
             self._unbindScaleListener()
             self._flushPosition()
             self._destroyed = True
+            self._positionLoaded = False
             self._dropWindow()
 
         def suspend(self):
@@ -662,6 +718,7 @@ if _GF_OK:
 
         def _setModel(self, model, publish=True):
             self._model = model
+            self._shift = [0, 0]
             if publish:
                 self.publish()
 
@@ -675,26 +732,89 @@ if _GF_OK:
             except Exception:
                 pass
 
+        def _publishShift(self, shift):
+            newShift = [int(shift[0]), int(shift[1])]
+            if newShift == self._shift:
+                return
+            self._shift = newShift
+            if self._model is None:
+                return
+            try:
+                with self._model.transaction() as model:
+                    model.setShift('%d,%d' % (newShift[0], newShift[1]))
+            except Exception:
+                pass
+
+        def logWindowState(self, tag):
+            if not logger.isEnabledFor(logging.DEBUG):
+                return
+            window = self._window
+            if window is None:
+                logger.debug('[Watch:%s] winstate[%s]: no window', self._name, tag)
+                return
+            try:
+                logger.debug('[Watch:%s] winstate[%s]: status=%s size=%s pos=%s globalPos=%s layer=%s '
+                             'screen=%s viewSize=%s pad=%s intended=%s offset=%s scale=%s lastMove=%s shift=%s',
+                             self._name, tag, window.windowStatus, window.size, window.position,
+                             window.globalPosition, window.layer, _screenResolution(), self._viewSize,
+                             self._viewPad, self._position, self._offset, self._stableScale,
+                             self._lastMove, self._shift)
+            except Exception:
+                pass
+
         def _onReady(self, *args):
             self._nativeReady = True
             self.publish()
             self._syncPosition()
             self._bindGuiResetter()
+            self.logWindowState('ready')
 
         def _onCommand(self, name, value):
             if name == 'onSize':
                 try:
-                    parts = unicode(value).split(u'x')
-                    self._viewSize = (max(1, int(float(parts[0]))), max(1, int(float(parts[1]))))
+                    parts = unicode(value).split(u'@')
+                    sizeParts = parts[0].split(u'x')
+                    width = max(1, int(float(sizeParts[0])))
+                    height = max(1, int(float(sizeParts[1])))
+                    pad = max(0, int(float(parts[1]))) if len(parts) > 1 else 0
                 except Exception:
                     return
-                self._syncPosition()
+                first = not self._sizeConfirmed
+                changed = (width, height) != tuple(self._viewSize) or pad != self._viewPad
+                self._sizeConfirmed = True
+                if not first and not changed:
+                    return
+                self._viewSize = (width, height)
+                self._viewPad = pad
+                if self._dragging:
+                    return
+                _cancelCallbackSafe(self._sizeSyncCallbackID)
+                self._sizeSyncCallbackID = BigWorld.callback(0.0, self._syncAfterViewSize)
+
+        def _syncAfterViewSize(self):
+            self._sizeSyncCallbackID = None
+            if self._destroyed or self._window is None:
+                return
+            self._syncPosition()
+            self._logSizeState()
+
+        def _logSizeState(self):
+            state = (tuple(self._viewSize), self._viewPad, tuple(self._position))
+            if state == self._loggedState:
+                return
+            self._loggedState = state
+            self.logWindowState('onSize')
 
         def _onViewFinalized(self):
             self._unbindGuiResetter()
+            _cancelCallbackSafe(self._sizeSyncCallbackID)
+            self._sizeSyncCallbackID = None
             self._window = None
             self._model = None
             self._nativeReady = False
+            self._sizeConfirmed = False
+            self._stableScale = None
+            self._scaleSample = None
             self._token += 1
             if self._active and not self._destroyed and not self._suspended:
                 BigWorld.callback(0.1, self._ensureWindow)
@@ -732,6 +852,8 @@ if _GF_OK:
 
         def _dropWindow(self):
             self._unbindGuiResetter()
+            _cancelCallbackSafe(self._sizeSyncCallbackID)
+            self._sizeSyncCallbackID = None
             self._token += 1
             if self._window is not None:
                 try:
@@ -741,52 +863,109 @@ if _GF_OK:
                 self._window = None
             self._model = None
             self._nativeReady = False
+            self._sizeConfirmed = False
+            self._stableScale = None
+            self._scaleSample = None
+            self._shift = [0, 0]
+
+        def _windowScale(self):
+            cached = self._stableScale
+            fallback = (cached, cached) if cached is not None else (1.0, 1.0)
+            window = self._window
+            if window is None:
+                return fallback
+            try:
+                nativeW, nativeH = window.size[:2]
+                nativeW = float(nativeW)
+                nativeH = float(nativeH)
+            except Exception:
+                return fallback
+            viewW = float(self._viewSize[0] + self._viewPad * 2)
+            viewH = float(self._viewSize[1] + self._viewPad * 2)
+            if nativeW <= 10 or nativeH <= 10 or viewW <= 10 or viewH <= 10:
+                return fallback
+            sample = (int(nativeW), int(nativeH), int(viewW), int(viewH))
+            confirmed = sample == self._scaleSample
+            self._scaleSample = sample
+            scaleW = viewW / nativeW
+            scaleH = viewH / nativeH
+            if abs(scaleW - scaleH) > 0.1 or not 0.4 <= scaleW <= 4.0:
+                return fallback
+            raw = scaleW if viewW >= viewH else scaleH
+            if cached is None:
+                self._stableScale = raw
+                return (raw, raw)
+            if abs(raw - cached) / cached > 0.05:
+                if not confirmed:
+                    return fallback
+                self._stableScale = raw
+                return (raw, raw)
+            return (cached, cached)
 
         def _move(self):
-            if self._window is None or not self._nativeReady:
+            if self._window is None or not self._nativeReady or not self._sizeConfirmed:
                 return
             self._clampPosition()
+            scaleX, scaleY = self._windowScale()
+            originX = int(self._position[0]) - self._viewPad
+            originY = int(self._position[1]) - self._viewPad
             try:
-                # Raw device pixels: the view is sized via viewEnv.resizeViewPx
-                # (in JS) to its on-screen pixel size, and onSize reports that
-                # same size, so _position and _viewSize are already in the
-                # window's coordinate space. No scale conversion needed.
-                self._window.move(int(self._position[0]), int(self._position[1]))
+                self._lastMove = (originX, originY,
+                                  self._window.move(int(round(originX / scaleX)),
+                                                    int(round(originY / scaleY))))
             except Exception:
-                pass
+                logger.exception('[Watch] move failed for %s', self._name)
+                return
+            self._syncShift(originX, originY, scaleX, scaleY)
 
-        def _anchor(self):
+        def _syncShift(self, wantX, wantY, scaleX, scaleY):
+            if self._window is None or not self._nativeReady:
+                return
             try:
-                return self._anchorFn(self._viewSize)
+                actualX, actualY = self._window.position[:2]
             except Exception:
-                return (0, 0)
+                return
+            self._publishShift((int(round(wantX - actualX * scaleX)),
+                                int(round(wantY - actualY * scaleY))))
 
         def _syncPosition(self):
-            if self._mode == 'battle':
-                # MainGun-style corner-relative anchoring: a non-negative offset
-                # is measured from the left/top edge, a negative one from the
-                # right/bottom edge, so the panel stays glued to its nearest
-                # corner across resolution and windowed<->fullscreen changes.
-                screenWidth, screenHeight = _screenResolution()
-                offsetX, offsetY = self._offset[0], self._offset[1]
-                self._position = [int(offsetX if offsetX >= 0 else screenWidth + offsetX),
-                                  int(offsetY if offsetY >= 0 else screenHeight + offsetY)]
-            else:
-                anchorX, anchorY = self._anchor()
-                self._position = [int(anchorX + self._offset[0]), int(anchorY + self._offset[1])]
+            if self._legacyOffset and self._sizeConfirmed:
+                self._convertLegacyOffset()
+            screenWidth, screenHeight = _screenResolution()
+            width, height = self._viewSize
+            offsetX, offsetY = self._offset[0], self._offset[1]
+            self._position = [int(offsetX if offsetX >= 0 else screenWidth + offsetX - width),
+                              int(offsetY if offsetY >= 0 else screenHeight + offsetY - height)]
             self._move()
 
         def _syncOffsetFromPosition(self):
+            screenWidth, screenHeight = _screenResolution()
+            xPos, yPos = int(self._position[0]), int(self._position[1])
+            width, height = self._viewSize
+            offsetX = xPos if (xPos + width * 0.5) < screenWidth * 0.5 else xPos + width - screenWidth
+            offsetY = yPos if (yPos + height * 0.5) < screenHeight * 0.5 else yPos + height - screenHeight
+            self._offset = [int(offsetX), int(offsetY)]
+
+        def _convertLegacyOffset(self):
+            self._legacyOffset = False
+            screenWidth, screenHeight = _screenResolution()
+            width = self._viewSize[0]
+            offsetX, offsetY = self._offset[0], self._offset[1]
             if self._mode == 'battle':
-                screenWidth, screenHeight = _screenResolution()
-                xPos, yPos = int(self._position[0]), int(self._position[1])
-                width, height = self._viewSize
-                offsetX = xPos if (xPos + width * 0.5) < screenWidth * 0.5 else xPos - screenWidth
-                offsetY = yPos if (yPos + height * 0.5) < screenHeight * 0.5 else yPos - screenHeight
-                self._offset = [int(offsetX), int(offsetY)]
+                xPos = offsetX if offsetX >= 0 else screenWidth + offsetX
+                yPos = offsetY if offsetY >= 0 else screenHeight + offsetY
             else:
-                anchorX, anchorY = self._anchor()
-                self._offset = [int(self._position[0] - anchorX), int(self._position[1] - anchorY)]
+                xPos = screenWidth - width + offsetX
+                yPos = offsetY
+            self._position = [int(xPos), int(yPos)]
+            self._clampPosition()
+            self._syncOffsetFromPosition()
+            self._lastSaved = (self._offset[0], self._offset[1])
+            self._positionDirty = False
+            try:
+                self._setOffset([self._offset[0], self._offset[1]])
+            except Exception:
+                logger.exception('[Watch] offset migration failed for %s', self._name)
 
         def _bindGuiResetter(self):
             if self._guiResetterBound or g_guiResetters is None:
@@ -806,18 +985,22 @@ if _GF_OK:
             self._guiResetterBound = False
 
         def _onScreenResize(self):
+            _invalidateScreenResolution()
             if self._destroyed or self._window is None:
                 return
             self._syncPosition()
+            self.logWindowState('resize')
             _cancelCallbackSafe(self._resizeCallbackID)
             self._resizeCallbackID = BigWorld.callback(0.2, self._resizeResync)
 
         def _resizeResync(self):
             self._resizeCallbackID = None
+            _invalidateScreenResolution()
             if self._destroyed or self._window is None:
                 return
             self.publish()
             self._syncPosition()
+            self.logWindowState('resize+0.2s')
 
         def _bindScaleListener(self):
             if self._scaleBound or ServicesLocator is None:
@@ -838,16 +1021,21 @@ if _GF_OK:
                 pass
 
         def _onScaleChanged(self, *args):
+            self._stableScale = None
+            self._scaleSample = None
             self.publish()
+            self._syncPosition()
+            self.logWindowState('scale')
 
         def _startDragTicker(self):
             if self._dragCallbackID is None:
-                self._dragCallbackID = BigWorld.callback(0.0, self._updateDragState)
+                self._dragCallbackID = BigWorld.callback(_DRAG_TICK_HOVER, self._updateDragState)
 
         def _stopDragTicker(self):
             _cancelCallbackSafe(self._dragCallbackID)
             self._dragCallbackID = None
             self._dragging = False
+            self._dragMoved = False
             self._mouseWasDown = False
             self._dragStartCursor = None
             self._dragStartPosition = None
@@ -856,48 +1044,65 @@ if _GF_OK:
             self._dragCallbackID = None
             if not self._active:
                 return
+            interval = _DRAG_TICK_HOVER
             if self._window is not None:
                 try:
-                    self._handleMouseDrag()
+                    interval = self._handleMouseDrag()
                 except Exception:
                     logger.exception('[Watch] drag tick failed for %s', self._name)
-            self._dragCallbackID = BigWorld.callback(0.0, self._updateDragState)
+            self._dragCallbackID = BigWorld.callback(interval, self._updateDragState)
 
         def _handleMouseDrag(self):
             cursor = GUI.mcursor()
             if not cursor.visible or not cursor.inWindow or not cursor.inFocus:
+                if self._dragging:
+                    self._finishDrag()
                 self._dragging = False
                 self._mouseWasDown = False
-                return
+                return _DRAG_TICK_IDLE
             mouseDown = BigWorld.isKeyDown(Keys.KEY_LEFTMOUSE)
             cursorPos = _cursorPixels(cursor)
             if mouseDown and not self._mouseWasDown:
                 over = self._isCursorOver(cursorPos)
                 if logger.isEnabledFor(logging.DEBUG):
-                    nativeSize = getattr(self._window, 'size', None)
-                    logger.debug('[Watch:%s] press cursor=%s pos=%s viewSize=%s nativeSize=%s over=%s',
+                    logger.debug('[Watch:%s] press cursor=%s pos=%s viewSize=%s pad=%s shift=%s '
+                                 'nativePos=%s nativeSize=%s over=%s',
                                  self._name, cursorPos, tuple(self._position), self._viewSize,
-                                 nativeSize, over)
+                                 self._viewPad, self._shift, getattr(self._window, 'position', None),
+                                 getattr(self._window, 'size', None), over)
                 if over:
                     self._dragging = True
+                    self._dragMoved = False
                     self._dragStartCursor = cursorPos
                     self._dragStartPosition = tuple(self._position)
             elif not mouseDown:
                 if self._dragging:
-                    self._flushPosition()
+                    self._finishDrag()
                 self._dragging = False
             if self._dragging and self._dragStartCursor is not None and self._dragStartPosition is not None:
                 dx = cursorPos[0] - self._dragStartCursor[0]
                 dy = cursorPos[1] - self._dragStartCursor[1]
-                self._setPosition(self._dragStartPosition[0] + dx, self._dragStartPosition[1] + dy)
+                if self._dragMoved or dx * dx + dy * dy >= _DRAG_THRESHOLD * _DRAG_THRESHOLD:
+                    self._dragMoved = True
+                    self._setPosition(self._dragStartPosition[0] + dx, self._dragStartPosition[1] + dy)
             self._mouseWasDown = mouseDown
+            return _DRAG_TICK_ACTIVE if self._dragging else _DRAG_TICK_HOVER
+
+        def _finishDrag(self):
+            self._dragging = False
+            moved = self._dragMoved
+            self._dragMoved = False
+            self._flushPosition()
+            if moved:
+                self.logWindowState('dragEnd')
 
         def _isCursorOver(self, cursorPos):
             if not self._visible or self._window is None:
                 return False
             left, top = self._position[0], self._position[1]
             width, height = self._viewSize
-            return left <= cursorPos[0] <= left + width and top <= cursorPos[1] <= top + height
+            return (left - _GRAB_PAD <= cursorPos[0] <= left + width + _GRAB_PAD and
+                    top - _GRAB_PAD <= cursorPos[1] <= top + height + _GRAB_PAD)
 
         def _bottomMargin(self):
             return _GARAGE_BOTTOM_MARGIN if self._mode == 'garage' else 0
@@ -939,6 +1144,7 @@ if _GF_OK:
                 return
             self._positionLoaded = True
             self._offset = list(self._getOffset())
+            self._legacyOffset = bool(self._getLegacy())
             self._lastSaved = (self._offset[0], self._offset[1])
             self._positionDirty = False
 
@@ -954,8 +1160,8 @@ if _GF_OK:
             self._lastSaved = current
             self._positionDirty = False
 
-    def _makeOverlay(name, mode, size, anchorFn, getOffset, setOffset, getDefault):
-        return _ClockOverlay(name, mode, size, anchorFn, getOffset, setOffset, getDefault)
+    def _makeOverlay(name, mode, size, getOffset, setOffset, getDefault, getLegacy):
+        return _ClockOverlay(name, mode, size, getOffset, setOffset, getDefault, getLegacy)
 
 else:
 
@@ -978,16 +1184,19 @@ else:
         def resume(self):
             pass
 
-    def _makeOverlay(name, mode, size, anchorFn, getOffset, setOffset, getDefault):
+        def logWindowState(self, tag):
+            pass
+
+    def _makeOverlay(name, mode, size, getOffset, setOffset, getDefault, getLegacy):
         return _NullOverlay()
 
 
 class _BattleClock(object):
     def __init__(self):
         self._overlay = _makeOverlay(
-            _BATTLE_NAME, 'battle', _BATTLE_SIZE, _battleAnchor,
+            _BATTLE_NAME, 'battle', _BATTLE_SIZE,
             lambda: g_config.battleOffset, g_config.setBattleOffset,
-            lambda: list(_DEFAULT_BATTLE_OFFSET))
+            lambda: list(_DEFAULT_BATTLE_OFFSET), lambda: g_config.legacyBattle)
         self._pageReady = False
         self._guiBound = False
         self._configBound = False
@@ -1086,9 +1295,9 @@ class _BattleClock(object):
 class _GarageClock(object):
     def __init__(self):
         self._overlay = _makeOverlay(
-            _GARAGE_NAME, 'garage', _GARAGE_SIZE, _garageAnchor,
+            _GARAGE_NAME, 'garage', _GARAGE_SIZE,
             lambda: g_config.garageOffset, g_config.setGarageOffset,
-            lambda: list(_DEFAULT_GARAGE_OFFSET))
+            lambda: list(_DEFAULT_GARAGE_OFFSET), lambda: g_config.legacyGarage)
         self._stateMachine = None
         self._smCallbackID = None
         self._isGarage = False
@@ -1215,6 +1424,7 @@ class _WatchMod(object):
     def init(self):
         if _GF_OK:
             _installHooks()
+        _installScreenResolutionWatcher()
         g_playerEvents.onAccountShowGUI += self._onAccountShowGUI
         g_playerEvents.onAvatarBecomePlayer += self._onAvatarBecomePlayer
         g_playerEvents.onAccountBecomeNonPlayer += self._onAccountBecomeNonPlayer

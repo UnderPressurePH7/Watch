@@ -1,12 +1,14 @@
 (function () {
     'use strict';
     var DEFAULT_DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+    var VIEW_PAD = 8;
     var root = document.getElementById('watch-root');
     var content = document.getElementById('watch-content');
     var timeEl = document.getElementById('watch-time');
     var dateEl = document.getElementById('watch-date');
     var cfg = {};
     var lastPayload = null;
+    var lastShift = null;
     var lastReportedSize = null;
     var measureFrame = null;
     var resizeRetryTimer = null;
@@ -88,18 +90,17 @@
         }
         w = Math.max(1, Math.ceil(w));
         h = Math.max(1, Math.ceil(h));
-        // Pin the root to the measured content box so the view has no dead
-        // space and can sit flush against any screen edge.
         root.style.width = w + 'px';
         root.style.height = h + 'px';
-        var key = w + 'x' + h;
+        root.style.margin = VIEW_PAD + 'px';
+        var key = w + 'x' + h + '@' + VIEW_PAD;
         if (key === lastReportedSize) {
             return;
         }
         var applied = false;
         try {
             if (window.viewEnv && viewEnv.resizeViewPx) {
-                viewEnv.resizeViewPx(w, h);
+                viewEnv.resizeViewPx(w + VIEW_PAD * 2, h + VIEW_PAD * 2);
                 applied = true;
             }
         } catch (e) {}
@@ -124,6 +125,33 @@
             measureFrame = null;
             reportSize();
         });
+    }
+
+    function applyShift() {
+        var raw = '0,0';
+        try {
+            if (window.model && window.model.shift) {
+                raw = String(window.model.shift);
+            }
+        } catch (e) {}
+        if (raw === lastShift) {
+            return;
+        }
+        lastShift = raw;
+        var parts = raw.split(',');
+        var dx = parseInt(parts[0], 10) || 0;
+        var dy = parseInt(parts[1], 10) || 0;
+        if (dx > VIEW_PAD) {
+            dx = VIEW_PAD;
+        } else if (dx < -VIEW_PAD) {
+            dx = -VIEW_PAD;
+        }
+        if (dy > VIEW_PAD) {
+            dy = VIEW_PAD;
+        } else if (dy < -VIEW_PAD) {
+            dy = -VIEW_PAD;
+        }
+        root.style.transform = (dx || dy) ? ('translate(' + dx + 'px, ' + dy + 'px)') : '';
     }
 
     function render() {
@@ -159,6 +187,7 @@
         readConfig();
         applyScale();
         render();
+        applyShift();
         scheduleMeasure();
     }
 
@@ -184,6 +213,7 @@
     applyConfig();
     applyScale();
     render();
+    applyShift();
     reportSize();
 
     if (window.engine && window.engine.whenReady) {
