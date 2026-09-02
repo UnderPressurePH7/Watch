@@ -1,6 +1,6 @@
 # Watch
 
-<img align="left" src="https://shields.io/badge/version-0.2.3-blue">
+<img align="left" src="https://shields.io/badge/version-0.2.4-blue">
 <br>
 
 ### Requirements:

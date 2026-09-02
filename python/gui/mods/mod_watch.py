@@ -18,7 +18,7 @@ except Exception:
 logger = logging.getLogger('Watch')
 logger.setLevel(logging.DEBUG if os.path.isfile('.debug_mods') else logging.ERROR)
 
-__version__ = '0.2.3'
+__version__ = '0.2.4'
 __author__ = 'Under_Pressure'
 
 _GF_OK = True
@@ -36,9 +36,13 @@ except Exception:
     logger.error('[Watch] openwg_gameface is required. Get it at https://gitlab.com/openwg/wot.gameface', exc_info=True)
 
 _WINDOW_BUSY_STATUSES = ()
+_WINDOW_DEAD_STATUSES = ()
 if _GF_OK:
     _WINDOW_BUSY_STATUSES = tuple(status for status in (getattr(WindowStatus, 'CREATED', None),
                                                         getattr(WindowStatus, 'LOADING', None))
+                                  if status is not None)
+    _WINDOW_DEAD_STATUSES = tuple(status for status in (getattr(WindowStatus, 'DESTROYING', None),
+                                                        getattr(WindowStatus, 'DESTROYED', None))
                                   if status is not None)
 
 try:
@@ -65,6 +69,14 @@ try:
     from gui.impl.lobby.hangar.states import DefaultHangarState, LegacyHangarState
 except Exception:
     DefaultHangarState = LegacyHangarState = None
+
+_APP_STATE_OK = True
+try:
+    from gui.app_loader.settings import APP_NAME_SPACE
+    from skeletons.gui.app_loader import ApplicationStateID, IAppLoader
+except Exception:
+    _APP_STATE_OK = False
+    IAppLoader = APP_NAME_SPACE = ApplicationStateID = None
 
 WATCH_CONFIG_DIR = os.path.join('mods', 'configs', 'under_pressure')
 _CONFIG_PATH = os.path.join(WATCH_CONFIG_DIR, 'watch.json')
@@ -128,6 +140,19 @@ def _cancelCallbackSafe(cbid):
         pass
 
 
+def _destroyWindowSafe(window):
+    try:
+        if window is None:
+            return
+        if getattr(window, 'proxy', None) is None:
+            return
+        if getattr(window, 'windowStatus', None) in _WINDOW_DEAD_STATUSES:
+            return
+        window.destroy()
+    except Exception:
+        logger.exception('[Watch] window destroy failed')
+
+
 def _importClass(classPath):
     try:
         moduleName, className = classPath.rsplit('.', 1)
@@ -167,6 +192,16 @@ def _isHangarState(state):
     except Exception:
         pass
     return False
+
+
+def _isHostAppInitialized(mode):
+    if not _APP_STATE_OK:
+        return None
+    try:
+        ns = APP_NAME_SPACE.SF_BATTLE if mode == 'battle' else APP_NAME_SPACE.SF_LOBBY
+        return dependency.instance(IAppLoader).getAppStateID(ns) == ApplicationStateID.INITIALIZED
+    except Exception:
+        return None
 
 
 def _dayNames():
@@ -590,6 +625,7 @@ if _GF_OK:
     class _ClockView(ViewImpl):
         def __init__(self, owner):
             self._owner = owner
+            self._viewToken = owner._token
             model = _ClockModel(owner.buildPayload())
             owner._setModel(model, publish=False)
             settings = ViewSettings(layoutID=owner.layoutID(), flags=ViewFlags.VIEW, model=model)
@@ -610,9 +646,10 @@ if _GF_OK:
                 logger.exception('[Watch] command %s failed', name)
 
         def _finalize(self):
-            self._owner._setModel(None)
+            if self._viewToken == self._owner._token:
+                self._owner._setModel(None)
             super(_ClockView, self)._finalize()
-            self._owner._onViewFinalized()
+            self._owner._onViewFinalized(self._viewToken)
 
     class _ClockWindow(WindowImpl):
         def __init__(self, content, parent, name, layer):
@@ -660,6 +697,7 @@ if _GF_OK:
             self._guiResetterBound = False
             self._resizeCallbackID = None
             self._sizeSyncCallbackID = None
+            self._loadCallbackID = None
             self._scaleBound = False
             self._suspended = False
             self._parentUid = None
@@ -728,6 +766,8 @@ if _GF_OK:
                 self.publish()
 
         def publish(self):
+            if self._destroyed or self._window is None:
+                return
             if self._model is None:
                 return
             payload = _buildPayload(self._mode, self._visible)
@@ -742,6 +782,8 @@ if _GF_OK:
             if newShift == self._shift:
                 return
             self._shift = newShift
+            if self._destroyed or self._window is None:
+                return
             if self._model is None:
                 return
             try:
@@ -754,8 +796,8 @@ if _GF_OK:
             if not logger.isEnabledFor(logging.DEBUG):
                 return
             window = self._window
-            if window is None:
-                logger.debug('[Watch:%s] winstate[%s]: no window', self._name, tag)
+            if not self._isWindowUsable():
+                logger.debug('[Watch:%s] winstate[%s]: no usable window', self._name, tag)
                 return
             try:
                 logger.debug('[Watch:%s] winstate[%s]: status=%s size=%s pos=%s globalPos=%s layer=%s '
@@ -798,7 +840,7 @@ if _GF_OK:
 
         def _syncAfterViewSize(self):
             self._sizeSyncCallbackID = None
-            if self._destroyed or self._window is None:
+            if not self._isWindowUsable():
                 return
             self._syncPosition()
             self._logSizeState()
@@ -810,7 +852,10 @@ if _GF_OK:
             self._loggedState = state
             self.logWindowState('onSize')
 
-        def _onViewFinalized(self):
+        def _onViewFinalized(self, token=None):
+            logger.error('[Watch:%s] view finalized token=%s current=%s', self._name, token, self._token)
+            if token is not None and token != self._token:
+                return
             self._unbindGuiResetter()
             _cancelCallbackSafe(self._sizeSyncCallbackID)
             self._sizeSyncCallbackID = None
@@ -822,6 +867,16 @@ if _GF_OK:
             self._scaleSample = None
             self._parentUid = None
             self._token += 1
+
+        def _isWindowUsable(self):
+            if self._destroyed or self._window is None:
+                return False
+            if getattr(self._window, 'proxy', None) is None:
+                return False
+            try:
+                return self._window.windowStatus not in _WINDOW_DEAD_STATUSES
+            except Exception:
+                return False
 
         def _ensureWindow(self):
             if self._destroyed or self._suspended:
@@ -837,6 +892,8 @@ if _GF_OK:
                 if current is None or currentUid is None or currentUid == self._parentUid:
                     return
                 self._dropWindow()
+            _cancelCallbackSafe(self._loadCallbackID)
+            self._loadCallbackID = None
             if gamefaceResMap is None:
                 return
             self._token += 1
@@ -848,7 +905,15 @@ if _GF_OK:
                 gamefaceOnReady(lambda: self._load(token))
 
         def _load(self, token, retry=0):
+            self._loadCallbackID = None
             if token != self._token or self._destroyed or self._suspended or self._window is not None:
+                return
+            appReady = _isHostAppInitialized(self._mode)
+            if appReady is False:
+                if retry < _LOAD_RETRY_LIMIT:
+                    self._loadCallbackID = BigWorld.callback(0.1, lambda: self._load(token, retry + 1))
+                else:
+                    logger.error('[Watch:%s] host app never initialized', self._name)
                 return
             try:
                 manager = dependency.instance(IGuiLoader).windowsManager
@@ -858,9 +923,9 @@ if _GF_OK:
                 parent = None
             if parent is None or parent.proxy is None or parent.windowStatus != WindowStatus.LOADED:
                 if retry < _LOAD_RETRY_LIMIT:
-                    BigWorld.callback(0.1, lambda: self._load(token, retry + 1))
+                    self._loadCallbackID = BigWorld.callback(0.1, lambda: self._load(token, retry + 1))
                 return
-            if self._mode == 'garage' and manager is not None and _WINDOW_BUSY_STATUSES:
+            if appReady is None and self._mode == 'garage' and manager is not None and _WINDOW_BUSY_STATUSES:
                 try:
                     busy = bool(manager.findWindows(
                         lambda window: getattr(window, 'windowStatus', None) in _WINDOW_BUSY_STATUSES))
@@ -868,13 +933,15 @@ if _GF_OK:
                     busy = False
                 if busy:
                     if retry < _LOAD_RETRY_LIMIT:
-                        BigWorld.callback(0.1, lambda: self._load(token, retry + 1))
+                        self._loadCallbackID = BigWorld.callback(0.1, lambda: self._load(token, retry + 1))
                     return
             if self._settleFrames > 0:
                 self._settleFrames -= 1
-                BigWorld.callback(0.0, lambda: self._load(token, retry))
+                self._loadCallbackID = BigWorld.callback(0.0, lambda: self._load(token, retry))
                 return
             try:
+                logger.error('[Watch:%s] create parent=%s retry=%d appReady=%s', self._name,
+                             getattr(parent, 'uniqueID', None), retry, appReady)
                 self._parentUid = getattr(parent, 'uniqueID', None)
                 self._window = _ClockWindow(_ClockView(self), parent, self._name, self._windowLayer())
                 self._window.load()
@@ -889,6 +956,8 @@ if _GF_OK:
             self._unbindGuiResetter()
             _cancelCallbackSafe(self._sizeSyncCallbackID)
             self._sizeSyncCallbackID = None
+            _cancelCallbackSafe(self._loadCallbackID)
+            self._loadCallbackID = None
             self._token += 1
             window = self._window
             self._window = None
@@ -900,16 +969,17 @@ if _GF_OK:
             self._parentUid = None
             self._shift = [0, 0]
             if window is not None:
+                logger.error('[Watch:%s] drop scheduled', self._name)
                 try:
-                    window.destroy()
+                    BigWorld.callback(0.0, lambda: _destroyWindowSafe(window))
                 except Exception:
-                    pass
+                    logger.exception('[Watch] deferred destroy scheduling failed for %s', self._name)
 
         def _windowScale(self):
             cached = self._stableScale
             fallback = (cached, cached) if cached is not None else (1.0, 1.0)
             window = self._window
-            if window is None:
+            if not self._isWindowUsable():
                 return fallback
             try:
                 nativeW, nativeH = window.size[:2]
@@ -940,7 +1010,7 @@ if _GF_OK:
             return (cached, cached)
 
         def _move(self):
-            if self._window is None or not self._nativeReady or not self._sizeConfirmed:
+            if not self._isWindowUsable() or not self._nativeReady or not self._sizeConfirmed:
                 return
             self._clampPosition()
             scaleX, scaleY = self._windowScale()
@@ -956,7 +1026,7 @@ if _GF_OK:
             self._syncShift(originX, originY, scaleX, scaleY)
 
         def _syncShift(self, wantX, wantY, scaleX, scaleY):
-            if self._window is None or not self._nativeReady:
+            if not self._isWindowUsable() or not self._nativeReady:
                 return
             try:
                 actualX, actualY = self._window.position[:2]
@@ -1023,7 +1093,7 @@ if _GF_OK:
 
         def _onScreenResize(self):
             _invalidateScreenResolution()
-            if self._destroyed or self._window is None:
+            if not self._isWindowUsable():
                 return
             self._syncPosition()
             self.logWindowState('resize')
@@ -1033,7 +1103,7 @@ if _GF_OK:
         def _resizeResync(self):
             self._resizeCallbackID = None
             _invalidateScreenResolution()
-            if self._destroyed or self._window is None:
+            if not self._isWindowUsable():
                 return
             self.publish()
             self._syncPosition()
@@ -1082,7 +1152,7 @@ if _GF_OK:
             if not self._active:
                 return
             interval = _DRAG_TICK_HOVER
-            if self._window is not None:
+            if self._isWindowUsable():
                 try:
                     interval = self._handleMouseDrag()
                 except Exception:
@@ -1134,7 +1204,7 @@ if _GF_OK:
                 self.logWindowState('dragEnd')
 
         def _isCursorOver(self, cursorPos):
-            if not self._visible or self._window is None:
+            if not self._visible or not self._isWindowUsable():
                 return False
             left, top = self._position[0], self._position[1]
             width, height = self._viewSize
@@ -1389,6 +1459,8 @@ class _GarageClock(object):
             self._overlay.disable()
 
     def _checkGarageState(self, state):
+        if state is None:
+            return False
         sm = self._stateMachine
         if sm is not None and (DefaultHangarState is not None or LegacyHangarState is not None):
             try:
@@ -1397,6 +1469,7 @@ class _GarageClock(object):
                     targets.append(sm.getStateByCls(DefaultHangarState))
                 if LegacyHangarState is not None:
                     targets.append(sm.getStateByCls(LegacyHangarState))
+                targets = [target for target in targets if target is not None]
                 if state in targets:
                     return True
             except Exception:
