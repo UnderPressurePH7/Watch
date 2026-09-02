@@ -18,7 +18,7 @@ except Exception:
 logger = logging.getLogger('Watch')
 logger.setLevel(logging.DEBUG if os.path.isfile('.debug_mods') else logging.ERROR)
 
-__version__ = '0.2.2'
+__version__ = '0.2.3'
 __author__ = 'Under_Pressure'
 
 _GF_OK = True
@@ -34,6 +34,12 @@ try:
 except Exception:
     _GF_OK = False
     logger.error('[Watch] openwg_gameface is required. Get it at https://gitlab.com/openwg/wot.gameface', exc_info=True)
+
+_WINDOW_BUSY_STATUSES = ()
+if _GF_OK:
+    _WINDOW_BUSY_STATUSES = tuple(status for status in (getattr(WindowStatus, 'CREATED', None),
+                                                        getattr(WindowStatus, 'LOADING', None))
+                                  if status is not None)
 
 try:
     from gui import g_guiResetters
@@ -77,6 +83,9 @@ _DRAG_THRESHOLD = 6
 _DRAG_TICK_ACTIVE = 0.0
 _DRAG_TICK_HOVER = 0.03
 _DRAG_TICK_IDLE = 0.05
+
+_LOAD_SETTLE_FRAMES = 2
+_LOAD_RETRY_LIMIT = 100
 
 _BATTLE_NAME = 'WatchBattle'
 _GARAGE_NAME = 'WatchGarage'
@@ -653,15 +662,13 @@ if _GF_OK:
             self._sizeSyncCallbackID = None
             self._scaleBound = False
             self._suspended = False
+            self._parentUid = None
+            self._settleFrames = 0
 
         def layoutID(self):
             return self._layout()
 
         def _windowLayer(self):
-            # Both overlays sit on the WINDOW layer, below the lobby/battle
-            # escape menus, so they never intercept ESC. This mirrors MainGun's
-            # battle panel; OVERLAY (higher than the menus) was what let the
-            # second ESC land on the clock instead of closing the menu.
             return getattr(WindowLayer, 'WINDOW', WindowLayer.OVERLAY)
 
         def buildPayload(self):
@@ -670,6 +677,7 @@ if _GF_OK:
         def enable(self):
             self._destroyed = False
             if self._active:
+                self._ensureWindow()
                 self.refresh()
                 return
             self._active = True
@@ -690,9 +698,6 @@ if _GF_OK:
             self._dropWindow()
 
         def suspend(self):
-            # Temporarily tear down the native window (e.g. while the in-battle
-            # escape menu is open) so this overlay stops sitting on top of the
-            # battle app and intercepting the ESC that should close the menu.
             if self._suspended:
                 return
             self._suspended = True
@@ -815,16 +820,27 @@ if _GF_OK:
             self._sizeConfirmed = False
             self._stableScale = None
             self._scaleSample = None
+            self._parentUid = None
             self._token += 1
-            if self._active and not self._destroyed and not self._suspended:
-                BigWorld.callback(0.1, self._ensureWindow)
 
         def _ensureWindow(self):
-            if self._destroyed or self._suspended or self._window is not None:
+            if self._destroyed or self._suspended:
                 return
+            if self._window is not None:
+                if self._parentUid is None:
+                    return
+                try:
+                    current = dependency.instance(IGuiLoader).windowsManager.getMainWindow()
+                except Exception:
+                    current = None
+                currentUid = getattr(current, 'uniqueID', None)
+                if current is None or currentUid is None or currentUid == self._parentUid:
+                    return
+                self._dropWindow()
             if gamefaceResMap is None:
                 return
             self._token += 1
+            self._settleFrames = _LOAD_SETTLE_FRAMES
             token = self._token
             if gamefaceResMap.isResMapValidated:
                 self._load(token)
@@ -832,22 +848,41 @@ if _GF_OK:
                 gamefaceOnReady(lambda: self._load(token))
 
         def _load(self, token, retry=0):
-            if token != self._token or self._destroyed:
+            if token != self._token or self._destroyed or self._suspended or self._window is not None:
                 return
             try:
-                parent = dependency.instance(IGuiLoader).windowsManager.getMainWindow()
+                manager = dependency.instance(IGuiLoader).windowsManager
+                parent = manager.getMainWindow()
             except Exception:
+                manager = None
                 parent = None
             if parent is None or parent.proxy is None or parent.windowStatus != WindowStatus.LOADED:
-                if retry < 100:
+                if retry < _LOAD_RETRY_LIMIT:
                     BigWorld.callback(0.1, lambda: self._load(token, retry + 1))
                 return
+            if self._mode == 'garage' and manager is not None and _WINDOW_BUSY_STATUSES:
+                try:
+                    busy = bool(manager.findWindows(
+                        lambda window: getattr(window, 'windowStatus', None) in _WINDOW_BUSY_STATUSES))
+                except Exception:
+                    busy = False
+                if busy:
+                    if retry < _LOAD_RETRY_LIMIT:
+                        BigWorld.callback(0.1, lambda: self._load(token, retry + 1))
+                    return
+            if self._settleFrames > 0:
+                self._settleFrames -= 1
+                BigWorld.callback(0.0, lambda: self._load(token, retry))
+                return
             try:
+                self._parentUid = getattr(parent, 'uniqueID', None)
                 self._window = _ClockWindow(_ClockView(self), parent, self._name, self._windowLayer())
                 self._window.load()
             except Exception:
                 logger.exception('[Watch] Failed to load overlay %s', self._name)
                 self._window = None
+                self._model = None
+                self._parentUid = None
                 return
 
         def _dropWindow(self):
@@ -855,18 +890,20 @@ if _GF_OK:
             _cancelCallbackSafe(self._sizeSyncCallbackID)
             self._sizeSyncCallbackID = None
             self._token += 1
-            if self._window is not None:
-                try:
-                    self._window.destroy()
-                except Exception:
-                    pass
-                self._window = None
+            window = self._window
+            self._window = None
             self._model = None
             self._nativeReady = False
             self._sizeConfirmed = False
             self._stableScale = None
             self._scaleSample = None
+            self._parentUid = None
             self._shift = [0, 0]
+            if window is not None:
+                try:
+                    window.destroy()
+                except Exception:
+                    pass
 
         def _windowScale(self):
             cached = self._stableScale
@@ -1108,9 +1145,6 @@ if _GF_OK:
             return _GARAGE_BOTTOM_MARGIN if self._mode == 'garage' else 0
 
         def _applyEdgeSnap(self, x, y):
-            # Magnetically pull the panel flush against the left/right/top edge
-            # when released/dragged within the snap distance. The bottom edge is
-            # intentionally excluded so its clearance margin is preserved.
             threshold = _GARAGE_EDGE_SNAP if self._mode == 'garage' else 0
             if threshold <= 0:
                 return (x, y)
@@ -1304,6 +1338,7 @@ class _GarageClock(object):
         self._configBound = False
 
     def bind(self, retry=0):
+        _cancelCallbackSafe(self._smCallbackID)
         self._smCallbackID = None
         stateMachine = getLobbyStateMachine()
         if stateMachine is None:
@@ -1427,6 +1462,7 @@ class _WatchMod(object):
         _installScreenResolutionWatcher()
         g_playerEvents.onAccountShowGUI += self._onAccountShowGUI
         g_playerEvents.onAvatarBecomePlayer += self._onAvatarBecomePlayer
+        g_playerEvents.onAvatarBecomeNonPlayer += self._onAvatarBecomeNonPlayer
         g_playerEvents.onAccountBecomeNonPlayer += self._onAccountBecomeNonPlayer
         g_playerEvents.onDisconnected += self._onDisconnected
         logger.debug('[Watch] Initialized v%s', __version__)
@@ -1434,6 +1470,7 @@ class _WatchMod(object):
     def fini(self):
         g_playerEvents.onAccountShowGUI -= self._onAccountShowGUI
         g_playerEvents.onAvatarBecomePlayer -= self._onAvatarBecomePlayer
+        g_playerEvents.onAvatarBecomeNonPlayer -= self._onAvatarBecomeNonPlayer
         g_playerEvents.onAccountBecomeNonPlayer -= self._onAccountBecomeNonPlayer
         g_playerEvents.onDisconnected -= self._onDisconnected
         _restoreHooks()
@@ -1455,6 +1492,9 @@ class _WatchMod(object):
 
     def _onAvatarBecomePlayer(self):
         self._garageClock.disable()
+
+    def _onAvatarBecomeNonPlayer(self):
+        self._battleClock.onBattlePageDisposed()
 
     def _onAccountBecomeNonPlayer(self):
         self._battleClock.onBattlePageDisposed()
