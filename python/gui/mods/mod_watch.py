@@ -18,7 +18,7 @@ except Exception:
 logger = logging.getLogger('Watch')
 logger.setLevel(logging.DEBUG if os.path.isfile('.debug_mods') else logging.ERROR)
 
-__version__ = '0.2.4'
+__version__ = '0.2.5'
 __author__ = 'Under_Pressure'
 
 _GF_OK = True
@@ -39,11 +39,17 @@ _WINDOW_BUSY_STATUSES = ()
 _WINDOW_DEAD_STATUSES = ()
 if _GF_OK:
     _WINDOW_BUSY_STATUSES = tuple(status for status in (getattr(WindowStatus, 'CREATED', None),
-                                                        getattr(WindowStatus, 'LOADING', None))
+                                                        getattr(WindowStatus, 'LOADING', None),
+                                                        getattr(WindowStatus, 'DESTROYING', None))
                                   if status is not None)
     _WINDOW_DEAD_STATUSES = tuple(status for status in (getattr(WindowStatus, 'DESTROYING', None),
                                                         getattr(WindowStatus, 'DESTROYED', None))
                                   if status is not None)
+
+try:
+    from skeletons.gui.shared.utils import IHangarSpace
+except Exception:
+    IHangarSpace = None
 
 try:
     from gui import g_guiResetters
@@ -98,6 +104,13 @@ _DRAG_TICK_IDLE = 0.05
 
 _LOAD_SETTLE_FRAMES = 2
 _LOAD_RETRY_LIMIT = 100
+_LOAD_SETTLE_HOLD = 0.1
+
+_GARAGE_SETTLE_DELAY = 0.35
+_GARAGE_SETTLE_RETRY = 0.35
+_GARAGE_SETTLE_MAX_WAITS = 60
+_GARAGE_SETTLE_FRAMES = 3
+_GARAGE_SETTLE_HOLD = 0.1
 
 _BATTLE_NAME = 'WatchBattle'
 _GARAGE_NAME = 'WatchGarage'
@@ -130,6 +143,9 @@ _HANGAR_STATE_CLASS_PATHS = (
     'fun_random.gui.impl.lobby.hangar.states.DefaultFunRandomHangarState',
     'battle_royale.gui.impl.lobby.views.states.BattleRoyaleHangarState',
 )
+
+
+_hangarSpaceMissingLogged = False
 
 
 def _cancelCallbackSafe(cbid):
@@ -192,6 +208,60 @@ def _isHangarState(state):
     except Exception:
         pass
     return False
+
+
+def _hangarSpace():
+    global _hangarSpaceMissingLogged
+    space = None
+    if IHangarSpace is not None:
+        try:
+            space = dependency.instance(IHangarSpace)
+        except Exception:
+            space = None
+    if space is None and not _hangarSpaceMissingLogged:
+        _hangarSpaceMissingLogged = True
+        logger.error('[Watch] IHangarSpace unavailable, hangar-ready gate is off')
+    return space
+
+
+def _isHangarSpaceReady():
+    space = _hangarSpace()
+    if space is None:
+        return True
+    try:
+        return bool(space.spaceInited)
+    except Exception:
+        return True
+
+
+def _isWindowBusy(window):
+    try:
+        return window.windowStatus in _WINDOW_BUSY_STATUSES
+    except Exception:
+        return False
+
+
+def _isHangarSettled():
+    if not _isHangarSpaceReady():
+        return False
+    try:
+        manager = dependency.instance(IGuiLoader).windowsManager
+        main = manager.getMainWindow()
+    except Exception:
+        return False
+    if main is None or getattr(main, 'proxy', None) is None:
+        return False
+    try:
+        if main.windowStatus != WindowStatus.LOADED:
+            return False
+    except Exception:
+        return False
+    if not _WINDOW_BUSY_STATUSES:
+        return True
+    try:
+        return not manager.findWindows(_isWindowBusy)
+    except Exception:
+        return True
 
 
 def _isHostAppInitialized(mode):
@@ -702,6 +772,7 @@ if _GF_OK:
             self._suspended = False
             self._parentUid = None
             self._settleFrames = 0
+            self.parentGate = None
 
         def layoutID(self):
             return self._layout()
@@ -925,7 +996,16 @@ if _GF_OK:
                 if retry < _LOAD_RETRY_LIMIT:
                     self._loadCallbackID = BigWorld.callback(0.1, lambda: self._load(token, retry + 1))
                 return
-            if appReady is None and self._mode == 'garage' and manager is not None and _WINDOW_BUSY_STATUSES:
+            if self.parentGate is not None and retry < _LOAD_RETRY_LIMIT:
+                allowed = True
+                try:
+                    allowed = bool(self.parentGate(parent))
+                except Exception:
+                    logger.exception('[Watch:%s] parent gate failed', self._name)
+                if not allowed:
+                    self._loadCallbackID = BigWorld.callback(0.1, lambda: self._load(token, retry + 1))
+                    return
+            if self._mode == 'garage' and manager is not None and _WINDOW_BUSY_STATUSES:
                 try:
                     busy = bool(manager.findWindows(
                         lambda window: getattr(window, 'windowStatus', None) in _WINDOW_BUSY_STATUSES))
@@ -934,10 +1014,12 @@ if _GF_OK:
                 if busy:
                     if retry < _LOAD_RETRY_LIMIT:
                         self._loadCallbackID = BigWorld.callback(0.1, lambda: self._load(token, retry + 1))
+                    else:
+                        logger.error('[Watch:%s] lobby never went idle, load abandoned', self._name)
                     return
             if self._settleFrames > 0:
                 self._settleFrames -= 1
-                self._loadCallbackID = BigWorld.callback(0.0, lambda: self._load(token, retry))
+                self._loadCallbackID = BigWorld.callback(_LOAD_SETTLE_HOLD, lambda: self._load(token, retry))
                 return
             try:
                 logger.error('[Watch:%s] create parent=%s retry=%d appReady=%s', self._name,
@@ -1406,6 +1488,13 @@ class _GarageClock(object):
         self._smCallbackID = None
         self._isGarage = False
         self._configBound = False
+        self._settleCbId = None
+        self._frameCbId = None
+        self._settleWaits = 0
+        self._settleFrames = 0
+        self._ensureReason = None
+        self._hangarSpaceBound = False
+        self._gateBound = False
 
     def bind(self, retry=0):
         _cancelCallbackSafe(self._smCallbackID)
@@ -1422,9 +1511,15 @@ class _GarageClock(object):
         if not self._configBound:
             self._configBound = True
             g_config.onConfigChanged += self._onConfigChanged
+        if not self._gateBound and hasattr(self._overlay, 'parentGate'):
+            self._gateBound = True
+            self._overlay.parentGate = self._isParentReady
+        self._bindHangarSpace()
         self._onVisibleRouteChanged(getattr(stateMachine, 'visibleRouteInfo', None))
 
     def unbind(self):
+        self._cancelSettle()
+        self._unbindHangarSpace()
         if self._smCallbackID is not None:
             _cancelCallbackSafe(self._smCallbackID)
             self._smCallbackID = None
@@ -1443,6 +1538,7 @@ class _GarageClock(object):
         self._isGarage = False
 
     def disable(self):
+        self._cancelSettle()
         self.unbind()
         self._overlay.disable()
 
@@ -1452,10 +1548,10 @@ class _GarageClock(object):
     def _onVisibleRouteChanged(self, routeInfo):
         state = getattr(routeInfo, 'state', None)
         self._isGarage = self._checkGarageState(state)
-        if self._isGarage and g_configParams.enabled.value and g_configParams.garageEnabled.value:
-            self._overlay.enable()
-            self._overlay.setVisible(True)
+        if self._shouldShow():
+            self._requestEnsure('route')
         else:
+            self._cancelSettle()
             self._overlay.disable()
 
     def _checkGarageState(self, state):
@@ -1478,6 +1574,134 @@ class _GarageClock(object):
 
     def _onConfigChanged(self):
         self._onVisibleRouteChanged(getattr(self._stateMachine, 'visibleRouteInfo', None))
+
+    def _shouldShow(self):
+        try:
+            return bool(_GF_OK
+                        and self._isGarage
+                        and g_configParams.enabled.value
+                        and g_configParams.garageEnabled.value)
+        except Exception:
+            logger.exception('[Watch] garage visibility check failed')
+            return False
+
+    def _isParentReady(self, parent):
+        if not _isHangarSpaceReady():
+            return False
+        try:
+            return parent.windowStatus == WindowStatus.LOADED
+        except Exception:
+            return False
+
+    def _requestEnsure(self, reason):
+        self._ensureReason = reason
+        self._settleWaits = 0
+        self._scheduleSettle(_GARAGE_SETTLE_DELAY)
+
+    def _scheduleSettle(self, delay):
+        _cancelCallbackSafe(self._settleCbId)
+        self._settleCbId = None
+        _cancelCallbackSafe(self._frameCbId)
+        self._frameCbId = None
+        try:
+            self._settleCbId = BigWorld.callback(delay, self._settleTick)
+        except Exception:
+            logger.exception('[Watch] failed to schedule garage settle')
+
+    def _cancelSettle(self):
+        _cancelCallbackSafe(self._settleCbId)
+        self._settleCbId = None
+        _cancelCallbackSafe(self._frameCbId)
+        self._frameCbId = None
+        self._settleWaits = 0
+        self._settleFrames = 0
+
+    def _retrySettle(self):
+        self._settleWaits += 1
+        if self._settleWaits > _GARAGE_SETTLE_MAX_WAITS:
+            logger.error('[Watch] garage settle budget exhausted, reason=%s', self._ensureReason)
+            return False
+        self._scheduleSettle(_GARAGE_SETTLE_RETRY)
+        return True
+
+    def _settleTick(self):
+        self._settleCbId = None
+        try:
+            if not self._shouldShow():
+                return
+            if not _isHangarSettled():
+                self._retrySettle()
+                return
+            self._settleWaits = 0
+            self._settleFrames = _GARAGE_SETTLE_FRAMES
+            self._frameTick()
+        except Exception:
+            logger.exception('[Watch] garage settle tick failed')
+
+    def _frameTick(self):
+        self._frameCbId = None
+        try:
+            if not self._shouldShow():
+                return
+            if self._settleFrames > 0:
+                self._settleFrames -= 1
+                self._frameCbId = BigWorld.callback(_GARAGE_SETTLE_HOLD, self._frameTick)
+                return
+            if not _isHangarSettled():
+                logger.error('[Watch] hangar unsettled at commit, waits=%d', self._settleWaits)
+                self._retrySettle()
+                return
+            self._commitEnsure()
+        except Exception:
+            logger.exception('[Watch] garage frame tick failed')
+
+    def _commitEnsure(self):
+        if not self._shouldShow():
+            return
+        self._overlay.enable()
+        self._overlay.setVisible(True)
+
+    def _bindHangarSpace(self):
+        if self._hangarSpaceBound:
+            return
+        space = _hangarSpace()
+        if space is None:
+            return
+        try:
+            space.onSpaceCreate += self._onHangarSpaceCreate
+            space.onSpaceDestroy += self._onHangarSpaceDestroy
+        except Exception:
+            logger.exception('[Watch] failed to bind hangar space events')
+            return
+        self._hangarSpaceBound = True
+        logger.debug('[Watch] hangar space events bound')
+
+    def _unbindHangarSpace(self):
+        if not self._hangarSpaceBound:
+            return
+        self._hangarSpaceBound = False
+        space = _hangarSpace()
+        if space is None:
+            return
+        try:
+            space.onSpaceCreate -= self._onHangarSpaceCreate
+            space.onSpaceDestroy -= self._onHangarSpaceDestroy
+        except Exception:
+            logger.exception('[Watch] failed to unbind hangar space events')
+
+    def _onHangarSpaceCreate(self, *_):
+        try:
+            if self._isGarage:
+                self._requestEnsure('space')
+        except Exception:
+            logger.exception('[Watch] hangar space create handler failed')
+
+    def _onHangarSpaceDestroy(self, *_):
+        try:
+            self._cancelSettle()
+            self._overlay.disable()
+        except Exception:
+            logger.exception('[Watch] hangar space destroy handler failed')
 
 
 _ORIGINAL_BATTLE_POPULATE = None
