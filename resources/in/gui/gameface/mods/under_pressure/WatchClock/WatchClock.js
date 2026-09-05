@@ -2,19 +2,50 @@
     'use strict';
     var DEFAULT_DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
     var VIEW_PAD = 8;
+    var DIGITS = /[0-9]/g;
+    var METRIC_SAMPLES = 10;
+    var CLOCK_PERIOD_SEC = 1000;
+    var CLOCK_PERIOD_MIN = 60000;
+    var CLOCK_GUARD = 20;
+
     var root = document.getElementById('watch-root');
     var content = document.getElementById('watch-content');
     var timeEl = document.getElementById('watch-time');
     var dateEl = document.getElementById('watch-date');
+
     var cfg = {};
+    var mode = root && String(root.className).indexOf('battle') !== -1 ? 'battle' : 'garage';
+    var hidden = false;
+
     var lastPayload = null;
     var lastShift = null;
+    var lastClass = null;
+    var lastColor = null;
+    var lastFontSize = null;
+    var lastDateDisplay = null;
     var lastReportedSize = null;
+    var lastTimeText = null;
+    var lastDateText = null;
+    var lastTimeShape = null;
+    var lastDateShape = null;
+
+    var metricsKey = null;
+    var metricsSize = null;
+    var metricsSamples = 0;
+    var metricsUniform = false;
+
     var measureFrame = null;
     var resizeRetryTimer = null;
+    var clockTimer = null;
+    var started = false;
+    var engineBound = false;
 
     function pad(n) {
         return n < 10 ? '0' + n : '' + n;
+    }
+
+    function shapeOf(text) {
+        return String(text).replace(DIGITS, '0');
     }
 
     function cmd(name, value) {
@@ -43,34 +74,61 @@
         return Math.min(w / 1920, h / 1080) || 1;
     }
 
-    function applyScale() {
-        var fontSize = uiScale() + 'px';
-        if (document.documentElement.style.fontSize !== fontSize) {
-            document.documentElement.style.fontSize = fontSize;
-        }
-    }
-
-    function readConfig() {
-        var raw = window.model && window.model.payload ? String(window.model.payload) : '';
-        if (raw === lastPayload) {
+    function applyRootClass() {
+        var cls = 'watch-' + mode + (hidden ? ' watch-hidden' : '');
+        if (cls === lastClass) {
             return;
         }
-        lastPayload = raw;
-        try {
-            cfg = JSON.parse(raw || '{}');
-        } catch (e) {
-            cfg = {};
-        }
-        applyConfig();
+        lastClass = cls;
+        root.className = cls;
     }
 
-    function applyConfig() {
-        var mode = cfg.mode === 'battle' || cfg.mode === 'garage'
-            ? cfg.mode
-            : (root.className.indexOf('battle') !== -1 ? 'battle' : 'garage');
-        root.className = 'watch-' + mode;
-        dateEl.style.display = mode === 'garage' ? 'block' : 'none';
-        timeEl.style.color = '#' + (cfg.color || 'FFFFFF');
+    function applyMode() {
+        var next = (cfg.mode === 'battle' || cfg.mode === 'garage') ? cfg.mode : mode;
+        var changed = next !== mode;
+        mode = next;
+        applyRootClass();
+        var display = mode === 'garage' ? 'block' : 'none';
+        if (display !== lastDateDisplay) {
+            lastDateDisplay = display;
+            dateEl.style.display = display;
+            changed = true;
+        }
+        return changed;
+    }
+
+    function applyColor() {
+        var color = '#' + (cfg.color || 'FFFFFF');
+        if (color === lastColor) {
+            return false;
+        }
+        lastColor = color;
+        timeEl.style.color = color;
+        return true;
+    }
+
+    function applyVisibility() {
+        var next = cfg.visible === false;
+        if (next === hidden) {
+            return false;
+        }
+        hidden = next;
+        applyRootClass();
+        return true;
+    }
+
+    function applyScale() {
+        var fontSize = uiScale() + 'px';
+        if (fontSize === lastFontSize) {
+            return false;
+        }
+        lastFontSize = fontSize;
+        document.documentElement.style.fontSize = fontSize;
+        return true;
+    }
+
+    function metricsSignature() {
+        return lastFontSize + '|' + mode + '|' + lastTimeShape + '|' + lastDateShape;
     }
 
     function reportSize() {
@@ -90,13 +148,32 @@
         }
         w = Math.max(1, Math.ceil(w));
         h = Math.max(1, Math.ceil(h));
-        root.style.width = w + 'px';
-        root.style.height = h + 'px';
-        root.style.margin = VIEW_PAD + 'px';
         var key = w + 'x' + h + '@' + VIEW_PAD;
+
+        var signature = metricsSignature();
+        if (signature !== metricsKey) {
+            metricsKey = signature;
+            metricsSize = key;
+            metricsSamples = 0;
+            metricsUniform = false;
+        } else if (!metricsUniform) {
+            if (key === metricsSize) {
+                metricsSamples += 1;
+                if (metricsSamples >= METRIC_SAMPLES) {
+                    metricsUniform = true;
+                }
+            } else {
+                metricsSize = key;
+                metricsSamples = 0;
+            }
+        }
+
         if (key === lastReportedSize) {
             return;
         }
+        root.style.width = w + 'px';
+        root.style.height = h + 'px';
+        root.style.margin = VIEW_PAD + 'px';
         var applied = false;
         try {
             if (window.viewEnv && viewEnv.resizeViewPx) {
@@ -127,6 +204,16 @@
         });
     }
 
+    function cancelMeasure() {
+        if (measureFrame === null) {
+            return;
+        }
+        try {
+            cancelAnimationFrame(measureFrame);
+        } catch (e) {}
+        measureFrame = null;
+    }
+
     function applyShift() {
         var raw = '0,0';
         try {
@@ -135,7 +222,7 @@
             }
         } catch (e) {}
         if (raw === lastShift) {
-            return;
+            return false;
         }
         lastShift = raw;
         var parts = raw.split(',');
@@ -152,15 +239,10 @@
             dy = -VIEW_PAD;
         }
         root.style.transform = (dx || dy) ? ('translate(' + dx + 'px, ' + dy + 'px)') : '';
+        return true;
     }
 
-    function render() {
-        var hidden = cfg.visible === false;
-        if (root.classList) {
-            root.classList.toggle('watch-hidden', hidden);
-        } else {
-            root.style.visibility = hidden ? 'hidden' : 'visible';
-        }
+    function renderClock() {
         var now = new Date();
         var h = now.getHours();
         var suffix = '';
@@ -173,32 +255,196 @@
         }
         var hh = cfg.format === '12' ? String(h) : pad(h);
         var showSec = cfg.showSeconds !== false;
-        timeEl.textContent = hh + ':' + pad(now.getMinutes()) + (showSec ? ':' + pad(now.getSeconds()) : '') + suffix;
-        if (cfg.mode === 'garage') {
+        var timeText = hh + ':' + pad(now.getMinutes()) + (showSec ? ':' + pad(now.getSeconds()) : '') + suffix;
+        var dateText = '';
+        if (mode === 'garage') {
             var days = cfg.days && cfg.days.length === 7 ? cfg.days : DEFAULT_DAYS;
             var dayName = days[(now.getDay() + 6) % 7] || '';
-            dateEl.textContent = dayName + ', ' + pad(now.getDate()) + '.' + pad(now.getMonth() + 1) + '.' + now.getFullYear();
-        } else {
-            dateEl.textContent = '';
+            dateText = dayName + ', ' + pad(now.getDate()) + '.' + pad(now.getMonth() + 1) + '.' + now.getFullYear();
         }
+        var measure = false;
+        if (timeText !== lastTimeText) {
+            lastTimeText = timeText;
+            timeEl.textContent = timeText;
+            var timeShape = shapeOf(timeText);
+            if (timeShape !== lastTimeShape) {
+                lastTimeShape = timeShape;
+                measure = true;
+            } else if (!metricsUniform) {
+                measure = true;
+            }
+        }
+        if (dateText !== lastDateText) {
+            lastDateText = dateText;
+            dateEl.textContent = dateText;
+            var dateShape = shapeOf(dateText);
+            if (dateShape !== lastDateShape) {
+                lastDateShape = dateShape;
+                measure = true;
+            } else if (!metricsUniform) {
+                measure = true;
+            }
+        }
+        return measure;
     }
 
-    function tick() {
-        readConfig();
-        applyScale();
-        render();
+    function stopClock() {
+        if (clockTimer === null) {
+            return;
+        }
+        window.clearTimeout(clockTimer);
+        clockTimer = null;
+    }
+
+    function scheduleClock() {
+        stopClock();
+        if (!started || hidden) {
+            return;
+        }
+        var period = cfg.showSeconds === false ? CLOCK_PERIOD_MIN : CLOCK_PERIOD_SEC;
+        var now = Date.now ? Date.now() : new Date().getTime();
+        var delay = period - (now % period);
+        if (delay < CLOCK_GUARD) {
+            delay += period;
+        }
+        clockTimer = window.setTimeout(onClockTimer, delay);
+    }
+
+    function onClockTimer() {
+        clockTimer = null;
+        if (renderClock()) {
+            scheduleMeasure();
+        }
+        scheduleClock();
+    }
+
+    function daysEqual(a, b) {
+        var aList = a && a.length === 7 ? a : DEFAULT_DAYS;
+        var bList = b && b.length === 7 ? b : DEFAULT_DAYS;
+        for (var i = 0; i < 7; i += 1) {
+            if (String(aList[i]) !== String(bList[i])) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    function readPayload() {
+        var raw = '';
+        try {
+            if (window.model && window.model.payload) {
+                raw = String(window.model.payload);
+            }
+        } catch (e) {}
+        if (raw === lastPayload) {
+            return false;
+        }
+        lastPayload = raw;
+        var next = {};
+        try {
+            next = JSON.parse(raw || '{}') || {};
+        } catch (e) {
+            next = {};
+        }
+        var prev = cfg;
+        cfg = next;
+
+        var modeChanged = applyMode();
+        applyColor();
+        var scaleChanged = applyScale();
+        var shownAgain = applyVisibility() && !hidden;
+        var clockChanged = modeChanged
+            || String(prev.format) !== String(next.format)
+            || (prev.showSeconds !== false) !== (next.showSeconds !== false)
+            || (mode === 'garage' && !daysEqual(prev.days, next.days));
+
+        if (hidden) {
+            stopClock();
+            cancelMeasure();
+            return true;
+        }
+        var measure = modeChanged || scaleChanged || shownAgain;
+        if (clockChanged || shownAgain) {
+            if (renderClock()) {
+                measure = true;
+            }
+            scheduleClock();
+        }
+        if (measure) {
+            scheduleMeasure();
+        }
+        return true;
+    }
+
+    function onModelChanged() {
+        readPayload();
         applyShift();
+    }
+
+    function onGeometryEvent() {
+        applyScale();
+        if (hidden) {
+            return;
+        }
         scheduleMeasure();
     }
 
-    function initialize() {
-        tick();
-        if (window.engine) {
-            window.engine.on('viewEnv.onDataChanged', tick);
-            window.engine.on('self.onScaleUpdated', tick);
-            window.engine.on('clientResized', tick);
+    function bindEngine() {
+        if (engineBound || !window.engine) {
+            return;
         }
-        window.setInterval(tick, 1000);
+        engineBound = true;
+        window.engine.on('viewEnv.onDataChanged', onModelChanged);
+        window.engine.on('self.onScaleUpdated', onGeometryEvent);
+        window.engine.on('clientResized', onGeometryEvent);
+    }
+
+    function unbindEngine() {
+        if (!engineBound || !window.engine) {
+            return;
+        }
+        engineBound = false;
+        try {
+            window.engine.off('viewEnv.onDataChanged', onModelChanged);
+            window.engine.off('self.onScaleUpdated', onGeometryEvent);
+            window.engine.off('clientResized', onGeometryEvent);
+        } catch (e) {}
+    }
+
+    function applyAll() {
+        readPayload();
+        applyScale();
+        if (renderClock()) {
+            scheduleMeasure();
+        }
+        applyShift();
+    }
+
+    function teardown() {
+        started = false;
+        stopClock();
+        cancelMeasure();
+        if (resizeRetryTimer !== null) {
+            window.clearTimeout(resizeRetryTimer);
+            resizeRetryTimer = null;
+        }
+        unbindEngine();
+    }
+
+    function initialize() {
+        if (started) {
+            return;
+        }
+        started = true;
+        bindEngine();
+        applyAll();
+        scheduleMeasure();
+        scheduleClock();
+        try {
+            if (window.addEventListener) {
+                window.addEventListener('unload', teardown);
+            }
+        } catch (e) {}
         if (window.model && typeof window.model.onReady === 'function') {
             window.model.onReady({});
         }
@@ -210,9 +456,11 @@
         });
     }
 
-    applyConfig();
+    applyMode();
+    applyColor();
+    applyVisibility();
     applyScale();
-    render();
+    renderClock();
     applyShift();
     reportSize();
 

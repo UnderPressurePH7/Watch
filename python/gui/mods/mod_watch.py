@@ -18,7 +18,7 @@ except Exception:
 logger = logging.getLogger('Watch')
 logger.setLevel(logging.DEBUG if os.path.isfile('.debug_mods') else logging.ERROR)
 
-__version__ = '0.2.5'
+__version__ = '0.2.6'
 __author__ = 'Under_Pressure'
 
 _GF_OK = True
@@ -94,16 +94,33 @@ _UTF8_BOM = '\xef\xbb\xbf'
 _DEFAULT_BATTLE_OFFSET = [-32, 8]
 _DEFAULT_GARAGE_OFFSET = [-32, 60]
 
-_ANCHOR_SCHEME = 2
+_ANCHOR_LEFT = 'left'
+_ANCHOR_RIGHT = 'right'
+_ANCHOR_TOP = 'top'
+_ANCHOR_BOTTOM = 'bottom'
+_ANCHOR_X_VALUES = (_ANCHOR_LEFT, _ANCHOR_RIGHT)
+_ANCHOR_Y_VALUES = (_ANCHOR_TOP, _ANCHOR_BOTTOM)
+
+_DEFAULT_BATTLE_ANCHOR = [_ANCHOR_RIGHT, _ANCHOR_TOP]
+_DEFAULT_GARAGE_ANCHOR = [_ANCHOR_RIGHT, _ANCHOR_TOP]
+
+_ANCHOR_SCHEME_LEGACY = 1
+_ANCHOR_SCHEME_SIGNED = 2
+_ANCHOR_SCHEME = 3
+_OFFSET_LIMIT = 20000
 
 _GRAB_PAD = 4
 _DRAG_THRESHOLD = 6
 _DRAG_TICK_ACTIVE = 0.0
 _DRAG_TICK_HOVER = 0.03
-_DRAG_TICK_IDLE = 0.05
+_DRAG_TICK_IDLE = 0.06
+_DRAG_TICK_SLEEP = 0.35
+_DRAG_IDLE_GRACE = 4
+_DRAG_NEAR_PAD = 200
 
 _LOAD_SETTLE_FRAMES = 2
 _LOAD_RETRY_LIMIT = 100
+_LOAD_RETRY_DELAY = 0.1
 _LOAD_SETTLE_HOLD = 0.1
 
 _GARAGE_SETTLE_DELAY = 0.35
@@ -283,14 +300,20 @@ def _dayNames():
 
 def _loadLocalization():
     global _l10n
-    import ResMgr
+    try:
+        import ResMgr
+    except Exception:
+        logger.exception('[Watch] ResMgr unavailable, built-in strings used')
+        return
     for tryLang in (_CLIENT_LANG, _L10N_FALLBACK):
         path = _L10N_DIR + '/' + tryLang + '.json'
         try:
             section = ResMgr.openSection(path)
             if section is not None:
-                _l10n = json.loads(section.asBinary)
-                return
+                loaded = json.loads(section.asBinary)
+                if isinstance(loaded, dict):
+                    _l10n = loaded
+                    return
         except Exception:
             pass
 
@@ -309,19 +332,86 @@ def _clamp(minVal, val, maxVal):
     return max(minVal, min(val, maxVal))
 
 
-def _toColorList(value):
+def _toColorList(value, default=None):
+    fallback = list(default) if default else [255, 255, 255]
     if isinstance(value, (list, tuple)) and len(value) == 3:
-        return [_clamp(0, int(c), 255) for c in value]
-    return [255, 255, 255]
+        result = []
+        for component in value:
+            try:
+                result.append(_clamp(0, int(component), 255))
+            except (TypeError, ValueError, OverflowError):
+                logger.error('[Config] bad colour component %r, keeping %s', component, fallback)
+                return fallback
+        return result
+    if value is not None:
+        logger.error('[Config] bad colour value %r, keeping %s', value, fallback)
+    return fallback
+
+
+def _toColorFromHex(value, default=None):
+    fallback = list(default) if default else [255, 255, 255]
+    try:
+        text = str(value).strip().lstrip('#')
+    except Exception:
+        text = ''
+    if len(text) == 3:
+        text = ''.join(char * 2 for char in text)
+    if len(text) != 6:
+        logger.error('[Config] bad colour string %r, keeping %s', value, fallback)
+        return fallback
+    try:
+        return [int(text[i:i + 2], 16) for i in (0, 2, 4)]
+    except (TypeError, ValueError):
+        logger.error('[Config] bad colour string %r, keeping %s', value, fallback)
+        return fallback
+
+
+def _parseOffset(value):
+    if isinstance(value, (list, tuple)) and len(value) >= 2:
+        try:
+            xPos = int(value[0])
+            yPos = int(value[1])
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return [_clamp(-_OFFSET_LIMIT, xPos, _OFFSET_LIMIT), _clamp(-_OFFSET_LIMIT, yPos, _OFFSET_LIMIT)]
+    return None
 
 
 def _toOffsetList(value, default):
+    parsed = _parseOffset(value)
+    return list(default) if parsed is None else parsed
+
+
+def _parseAnchor(value):
     if isinstance(value, (list, tuple)) and len(value) >= 2:
         try:
-            return [int(value[0]), int(value[1])]
-        except (TypeError, ValueError):
-            pass
-    return list(default)
+            anchorX = str(value[0]).strip().lower()
+            anchorY = str(value[1]).strip().lower()
+        except Exception:
+            return None
+        if anchorX in _ANCHOR_X_VALUES and anchorY in _ANCHOR_Y_VALUES:
+            return [anchorX, anchorY]
+    return None
+
+
+def _toAnchorList(value, default):
+    parsed = _parseAnchor(value)
+    return list(default) if parsed is None else parsed
+
+
+def _anchorFromSignedOffset(offset):
+    return [_ANCHOR_LEFT if offset[0] >= 0 else _ANCHOR_RIGHT,
+            _ANCHOR_TOP if offset[1] >= 0 else _ANCHOR_BOTTOM]
+
+
+def _readScheme(value, default):
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        logger.error('[Config] bad anchor scheme %r, assuming %s', value, default)
+        return default
 
 
 def _loadJsonFile(path):
@@ -383,13 +473,29 @@ def _invalidateScreenResolution():
     _screenResolutionCache = None
 
 
+_screenResolutionWatcherBound = False
+
+
 def _installScreenResolutionWatcher():
-    if g_guiResetters is None:
+    global _screenResolutionWatcherBound
+    if g_guiResetters is None or _screenResolutionWatcherBound:
         return
     try:
         g_guiResetters.add(_invalidateScreenResolution)
+        _screenResolutionWatcherBound = True
     except Exception:
-        pass
+        logger.exception('[Watch] failed to install the screen resolution watcher')
+
+
+def _removeScreenResolutionWatcher():
+    global _screenResolutionWatcherBound
+    if g_guiResetters is None or not _screenResolutionWatcherBound:
+        return
+    _screenResolutionWatcherBound = False
+    try:
+        g_guiResetters.discard(_invalidateScreenResolution)
+    except Exception:
+        logger.exception('[Watch] failed to remove the screen resolution watcher')
 
 
 def _interfaceScale():
@@ -467,10 +573,9 @@ class _ColorParam(object):
     @msaValue.setter
     def msaValue(self, v):
         if isinstance(v, (list, tuple)):
-            self.value = _toColorList(v)
+            self.value = _toColorList(v, self.value)
         else:
-            h = str(v).lstrip('#')
-            self.value = [int(h[i:i + 2], 16) for i in (0, 2, 4)]
+            self.value = _toColorFromHex(v, self.value)
 
     def renderParam(self, header, body=None):
         return {
@@ -511,62 +616,93 @@ class _Config(object):
         self._finalized = False
         self.battleOffset = list(_DEFAULT_BATTLE_OFFSET)
         self.garageOffset = list(_DEFAULT_GARAGE_OFFSET)
+        self.battleAnchor = list(_DEFAULT_BATTLE_ANCHOR)
+        self.garageAnchor = list(_DEFAULT_GARAGE_ANCHOR)
         self.legacyBattle = False
         self.legacyGarage = False
         self._configEncoding = _CONFIG_ENCODING_UTF8
-        self._loadConfig()
-        self._registerMod()
+        try:
+            self._loadConfig()
+        except Exception:
+            logger.exception('[Config] Load failed completely, defaults kept')
+        try:
+            self._registerMod()
+        except Exception:
+            logger.exception('[Config] MSA registration failed')
 
     def fini(self):
         self._finalized = True
         self.onConfigChanged.clear()
 
-    def setBattleOffset(self, offset):
-        new = _toOffsetList(offset, _DEFAULT_BATTLE_OFFSET)
-        if new == self.battleOffset and not self.legacyBattle:
-            return
-        self.battleOffset = new
-        self.legacyBattle = False
+    def setBattleOffset(self, offset, anchor=None):
+        self._setAnchoredOffset('battle', offset, anchor)
+
+    def setGarageOffset(self, offset, anchor=None):
+        self._setAnchoredOffset('garage', offset, anchor)
+
+    def _setAnchoredOffset(self, mode, offset, anchor):
+        if mode == 'battle':
+            newOffset = _toOffsetList(offset, _DEFAULT_BATTLE_OFFSET)
+            newAnchor = list(self.battleAnchor) if anchor is None else _toAnchorList(anchor, self.battleAnchor)
+            if newOffset == self.battleOffset and newAnchor == self.battleAnchor and not self.legacyBattle:
+                return
+            self.battleOffset = newOffset
+            self.battleAnchor = newAnchor
+            self.legacyBattle = False
+        else:
+            newOffset = _toOffsetList(offset, _DEFAULT_GARAGE_OFFSET)
+            newAnchor = list(self.garageAnchor) if anchor is None else _toAnchorList(anchor, self.garageAnchor)
+            if newOffset == self.garageOffset and newAnchor == self.garageAnchor and not self.legacyGarage:
+                return
+            self.garageOffset = newOffset
+            self.garageAnchor = newAnchor
+            self.legacyGarage = False
         self._saveConfig()
 
-    def setGarageOffset(self, offset):
-        new = _toOffsetList(offset, _DEFAULT_GARAGE_OFFSET)
-        if new == self.garageOffset and not self.legacyGarage:
-            return
-        self.garageOffset = new
-        self.legacyGarage = False
-        self._saveConfig()
+    def _readMode(self, data, prefix, globalScheme, defaultOffset, defaultAnchor):
+        offsetKey = prefix + '-anchor-offset'
+        scheme = _readScheme(data.get(prefix + '-anchor-scheme'), globalScheme)
+        if offsetKey not in data:
+            return (True, list(defaultOffset), list(defaultAnchor), False)
+        offset = _parseOffset(data[offsetKey])
+        if offset is None:
+            logger.error('[Config] bad %s %r, default used', offsetKey, data[offsetKey])
+            return (True, list(defaultOffset), list(defaultAnchor), False)
+        if scheme >= _ANCHOR_SCHEME:
+            anchor = _parseAnchor(data.get(prefix + '-anchor'))
+            if anchor is not None:
+                return (False, offset, anchor, False)
+            logger.error('[Config] missing or bad %s-anchor, signed reading used', prefix)
+            return (True, offset, _anchorFromSignedOffset(offset), False)
+        if scheme == _ANCHOR_SCHEME_SIGNED:
+            return (True, offset, _anchorFromSignedOffset(offset), False)
+        return (True, offset, _anchorFromSignedOffset(offset), True)
 
     def _applyData(self, data):
+        if not isinstance(data, dict):
+            if data is not None:
+                logger.error('[Config] config root is %s, not an object; defaults used', type(data).__name__)
+            return True
         missing = False
         for token, param in g_configParams.items().items():
-            if token in data:
+            if token not in data:
+                missing = True
+                continue
+            try:
                 if isinstance(param, _CheckboxParam):
                     param.value = _toBool(data[token])
                 elif isinstance(param, _ColorParam):
-                    param.value = _toColorList(data[token])
-            else:
+                    param.value = _toColorList(data[token], param.value)
+            except Exception:
+                logger.error('[Config] unusable value for %s, default kept', token)
                 missing = True
 
-        try:
-            scheme = int(data.get('anchor-scheme', 1))
-        except (TypeError, ValueError):
-            scheme = 1
-        legacy = scheme != _ANCHOR_SCHEME
-        if legacy:
-            missing = True
-
-        if 'battle-anchor-offset' in data:
-            self.battleOffset = _toOffsetList(data['battle-anchor-offset'], _DEFAULT_BATTLE_OFFSET)
-            self.legacyBattle = legacy
-        else:
-            missing = True
-        if 'garage-anchor-offset' in data:
-            self.garageOffset = _toOffsetList(data['garage-anchor-offset'], _DEFAULT_GARAGE_OFFSET)
-            self.legacyGarage = legacy
-        else:
-            missing = True
-        return missing
+        globalScheme = _readScheme(data.get('anchor-scheme'), _ANCHOR_SCHEME_LEGACY)
+        battleRepaired, self.battleOffset, self.battleAnchor, self.legacyBattle = self._readMode(
+            data, 'battle', globalScheme, _DEFAULT_BATTLE_OFFSET, _DEFAULT_BATTLE_ANCHOR)
+        garageRepaired, self.garageOffset, self.garageAnchor, self.legacyGarage = self._readMode(
+            data, 'garage', globalScheme, _DEFAULT_GARAGE_OFFSET, _DEFAULT_GARAGE_ANCHOR)
+        return missing or battleRepaired or garageRepaired
 
     def _loadConfig(self):
         data = {}
@@ -579,7 +715,11 @@ class _Config(object):
                 data = {}
                 existed = False
                 self._configEncoding = _CONFIG_ENCODING_UTF8
-        repaired = self._applyData(data)
+        try:
+            repaired = self._applyData(data)
+        except Exception:
+            logger.exception('[Config] Config contents unusable, defaults applied')
+            repaired = True
         if not existed or repaired:
             self._saveConfig()
 
@@ -590,9 +730,15 @@ class _Config(object):
             data = {}
             for token, param in g_configParams.items().items():
                 data[token] = param.value
+            battleScheme = _ANCHOR_SCHEME_LEGACY if self.legacyBattle else _ANCHOR_SCHEME
+            garageScheme = _ANCHOR_SCHEME_LEGACY if self.legacyGarage else _ANCHOR_SCHEME
             data['battle-anchor-offset'] = list(self.battleOffset)
+            data['battle-anchor'] = list(self.battleAnchor)
+            data['battle-anchor-scheme'] = battleScheme
             data['garage-anchor-offset'] = list(self.garageOffset)
-            data['anchor-scheme'] = _ANCHOR_SCHEME
+            data['garage-anchor'] = list(self.garageAnchor)
+            data['garage-anchor-scheme'] = garageScheme
+            data['anchor-scheme'] = min(battleScheme, garageScheme)
             _saveJsonFile(_CONFIG_PATH, data, self._configEncoding)
         except Exception as e:
             logger.error('[Config] Save failed: %s', e)
@@ -638,24 +784,40 @@ class _Config(object):
             logger.error('[Config] MSA register failed: %s', e)
 
     def _applyMsa(self, settings, save=True):
+        if not isinstance(settings, dict):
+            logger.error('[Config] MSA settings are %s, not a mapping; ignored', type(settings).__name__)
+            return
         params = g_configParams.items()
+        applied = False
         for name, value in settings.items():
-            if name in params:
-                params[name].msaValue = value
-        if save:
+            param = params.get(name)
+            if param is None:
+                continue
+            try:
+                param.msaValue = value
+                applied = True
+            except Exception:
+                logger.error('[Config] MSA sent an unusable value for %s, current value kept', name)
+        if save and applied:
             self._saveConfig()
 
     def _onSettingsChanged(self, linkage, newSettings):
         if linkage != MOD_LINKAGE or self._finalized:
             return
-        self._applyMsa(newSettings)
+        try:
+            self._applyMsa(newSettings)
+        except Exception:
+            logger.exception('[Config] failed to apply MSA settings')
         try:
             self.onConfigChanged()
         except Exception:
-            pass
+            logger.exception('[Config] config listeners failed')
 
 
-_loadLocalization()
+try:
+    _loadLocalization()
+except Exception:
+    logger.exception('[Watch] localization load failed')
 g_config = _Config()
 
 
@@ -704,12 +866,25 @@ if _GF_OK:
         def _getEvents(self):
             model = self.getViewModel()
             return (
-                (model.onReady, self._owner._onReady),
+                (model.onReady, self._onViewReady),
                 (model.onCmd, self._onCmd),
             )
 
+        def _isCurrent(self):
+            owner = self._owner
+            return owner is not None and not owner._destroyed and self._viewToken == owner._token
+
+        def _onViewReady(self, *args):
+            if not self._isCurrent():
+                logger.debug('[Watch] stale onReady dropped, token=%s', self._viewToken)
+                return
+            self._owner._onReady(*args)
+
         @args2params(str, str)
         def _onCmd(self, name, value):
+            if not self._isCurrent():
+                logger.debug('[Watch] stale command %s dropped, token=%s', name, self._viewToken)
+                return
             try:
                 self._owner._onCommand(name, value)
             except Exception:
@@ -729,15 +904,14 @@ if _GF_OK:
             self.show(focus=False)
 
     class _ClockOverlay(object):
-        def __init__(self, name, mode, size, getOffset, setOffset, getDefault, getLegacy):
+        def __init__(self, name, mode, size, getState, setState, getDefault):
             self._name = name
             self._mode = mode
             self._viewSize = (max(1, int(size[0])), max(1, int(size[1])))
             self._viewPad = 0
-            self._getOffset = getOffset
-            self._setOffset = setOffset
+            self._getState = getState
+            self._setState = setState
             self._getDefault = getDefault
-            self._getLegacy = getLegacy
             self._layout = ModDynAccessor('mods/under_pressure/%s/layoutID' % name)
             self._window = None
             self._model = None
@@ -746,7 +920,9 @@ if _GF_OK:
             self._destroyed = False
             self._active = False
             self._visible = True
-            self._offset = list(getDefault())
+            defaultOffset, defaultAnchor = getDefault()
+            self._offset = list(defaultOffset)
+            self._anchor = list(defaultAnchor)
             self._position = [0, 0]
             self._positionLoaded = False
             self._positionDirty = False
@@ -761,6 +937,8 @@ if _GF_OK:
             self._dragging = False
             self._dragMoved = False
             self._mouseWasDown = False
+            self._pressArmed = False
+            self._dragIdleTicks = 0
             self._dragStartCursor = None
             self._dragStartPosition = None
             self._dragCallbackID = None
@@ -788,13 +966,14 @@ if _GF_OK:
             if self._active:
                 self._ensureWindow()
                 self.refresh()
+                self._syncDragTicker()
                 return
             self._active = True
             self._visible = True
             self._loadPosition()
             self._bindScaleListener()
             self._ensureWindow()
-            self._startDragTicker()
+            self._syncDragTicker()
 
         def disable(self):
             self._active = False
@@ -810,6 +989,7 @@ if _GF_OK:
             if self._suspended:
                 return
             self._suspended = True
+            self._stopDragTicker()
             self._flushPosition()
             self._dropWindow()
 
@@ -819,6 +999,7 @@ if _GF_OK:
             self._suspended = False
             if self._active and not self._destroyed:
                 self._ensureWindow()
+            self._syncDragTicker()
 
         def setVisible(self, value):
             value = bool(value)
@@ -826,6 +1007,7 @@ if _GF_OK:
                 return
             self._visible = value
             self.publish()
+            self._syncDragTicker()
 
         def refresh(self):
             self.publish()
@@ -885,6 +1067,7 @@ if _GF_OK:
             self.publish()
             self._syncPosition()
             self._bindGuiResetter()
+            self._syncDragTicker()
             self.logWindowState('ready')
 
         def _onCommand(self, name, value):
@@ -924,7 +1107,7 @@ if _GF_OK:
             self.logWindowState('onSize')
 
         def _onViewFinalized(self, token=None):
-            logger.error('[Watch:%s] view finalized token=%s current=%s', self._name, token, self._token)
+            logger.debug('[Watch:%s] view finalized token=%s current=%s', self._name, token, self._token)
             if token is not None and token != self._token:
                 return
             self._unbindGuiResetter()
@@ -938,6 +1121,7 @@ if _GF_OK:
             self._scaleSample = None
             self._parentUid = None
             self._token += 1
+            self._stopDragTicker()
 
         def _isWindowUsable(self):
             if self._destroyed or self._window is None:
@@ -975,16 +1159,19 @@ if _GF_OK:
             else:
                 gamefaceOnReady(lambda: self._load(token))
 
+        def _retryLoad(self, token, retry, reason):
+            if retry >= _LOAD_RETRY_LIMIT:
+                logger.error('[Watch:%s] load abandoned after %d retries: %s', self._name, retry, reason)
+                return
+            self._loadCallbackID = BigWorld.callback(_LOAD_RETRY_DELAY, lambda: self._load(token, retry + 1))
+
         def _load(self, token, retry=0):
             self._loadCallbackID = None
             if token != self._token or self._destroyed or self._suspended or self._window is not None:
                 return
             appReady = _isHostAppInitialized(self._mode)
             if appReady is False:
-                if retry < _LOAD_RETRY_LIMIT:
-                    self._loadCallbackID = BigWorld.callback(0.1, lambda: self._load(token, retry + 1))
-                else:
-                    logger.error('[Watch:%s] host app never initialized', self._name)
+                self._retryLoad(token, retry, 'host app not initialized')
                 return
             try:
                 manager = dependency.instance(IGuiLoader).windowsManager
@@ -993,17 +1180,16 @@ if _GF_OK:
                 manager = None
                 parent = None
             if parent is None or parent.proxy is None or parent.windowStatus != WindowStatus.LOADED:
-                if retry < _LOAD_RETRY_LIMIT:
-                    self._loadCallbackID = BigWorld.callback(0.1, lambda: self._load(token, retry + 1))
+                self._retryLoad(token, retry, 'main window not loaded')
                 return
-            if self.parentGate is not None and retry < _LOAD_RETRY_LIMIT:
-                allowed = True
+            if self.parentGate is not None:
                 try:
                     allowed = bool(self.parentGate(parent))
                 except Exception:
                     logger.exception('[Watch:%s] parent gate failed', self._name)
+                    allowed = False
                 if not allowed:
-                    self._loadCallbackID = BigWorld.callback(0.1, lambda: self._load(token, retry + 1))
+                    self._retryLoad(token, retry, 'parent gate closed')
                     return
             if self._mode == 'garage' and manager is not None and _WINDOW_BUSY_STATUSES:
                 try:
@@ -1012,17 +1198,14 @@ if _GF_OK:
                 except Exception:
                     busy = False
                 if busy:
-                    if retry < _LOAD_RETRY_LIMIT:
-                        self._loadCallbackID = BigWorld.callback(0.1, lambda: self._load(token, retry + 1))
-                    else:
-                        logger.error('[Watch:%s] lobby never went idle, load abandoned', self._name)
+                    self._retryLoad(token, retry, 'lobby still busy')
                     return
             if self._settleFrames > 0:
                 self._settleFrames -= 1
                 self._loadCallbackID = BigWorld.callback(_LOAD_SETTLE_HOLD, lambda: self._load(token, retry))
                 return
             try:
-                logger.error('[Watch:%s] create parent=%s retry=%d appReady=%s', self._name,
+                logger.debug('[Watch:%s] create parent=%s retry=%d appReady=%s', self._name,
                              getattr(parent, 'uniqueID', None), retry, appReady)
                 self._parentUid = getattr(parent, 'uniqueID', None)
                 self._window = _ClockWindow(_ClockView(self), parent, self._name, self._windowLayer())
@@ -1050,8 +1233,9 @@ if _GF_OK:
             self._scaleSample = None
             self._parentUid = None
             self._shift = [0, 0]
+            self._stopDragTicker()
             if window is not None:
-                logger.error('[Watch:%s] drop scheduled', self._name)
+                logger.debug('[Watch:%s] drop scheduled', self._name)
                 try:
                     BigWorld.callback(0.0, lambda: _destroyWindowSafe(window))
                 except Exception:
@@ -1123,17 +1307,29 @@ if _GF_OK:
             screenWidth, screenHeight = _screenResolution()
             width, height = self._viewSize
             offsetX, offsetY = self._offset[0], self._offset[1]
-            self._position = [int(offsetX if offsetX >= 0 else screenWidth + offsetX - width),
-                              int(offsetY if offsetY >= 0 else screenHeight + offsetY - height)]
+            anchorX, anchorY = self._anchor[0], self._anchor[1]
+            xPos = offsetX if anchorX == _ANCHOR_LEFT else screenWidth + offsetX - width
+            yPos = offsetY if anchorY == _ANCHOR_TOP else screenHeight + offsetY - height
+            self._position = [int(xPos), int(yPos)]
             self._move()
 
         def _syncOffsetFromPosition(self):
             screenWidth, screenHeight = _screenResolution()
             xPos, yPos = int(self._position[0]), int(self._position[1])
             width, height = self._viewSize
-            offsetX = xPos if (xPos + width * 0.5) < screenWidth * 0.5 else xPos + width - screenWidth
-            offsetY = yPos if (yPos + height * 0.5) < screenHeight * 0.5 else yPos + height - screenHeight
+            if (xPos + width * 0.5) < screenWidth * 0.5:
+                anchorX, offsetX = _ANCHOR_LEFT, xPos
+            else:
+                anchorX, offsetX = _ANCHOR_RIGHT, xPos + width - screenWidth
+            if (yPos + height * 0.5) < screenHeight * 0.5:
+                anchorY, offsetY = _ANCHOR_TOP, yPos
+            else:
+                anchorY, offsetY = _ANCHOR_BOTTOM, yPos + height - screenHeight
             self._offset = [int(offsetX), int(offsetY)]
+            self._anchor = [anchorX, anchorY]
+
+        def _savedKey(self):
+            return (self._offset[0], self._offset[1], self._anchor[0], self._anchor[1])
 
         def _convertLegacyOffset(self):
             self._legacyOffset = False
@@ -1149,12 +1345,14 @@ if _GF_OK:
             self._position = [int(xPos), int(yPos)]
             self._clampPosition()
             self._syncOffsetFromPosition()
-            self._lastSaved = (self._offset[0], self._offset[1])
-            self._positionDirty = False
             try:
-                self._setOffset([self._offset[0], self._offset[1]])
+                self._setState([self._offset[0], self._offset[1]], list(self._anchor))
             except Exception:
                 logger.exception('[Watch] offset migration failed for %s', self._name)
+                self._legacyOffset = True
+                return
+            self._lastSaved = self._savedKey()
+            self._positionDirty = False
 
         def _bindGuiResetter(self):
             if self._guiResetterBound or g_guiResetters is None:
@@ -1216,30 +1414,57 @@ if _GF_OK:
             self._syncPosition()
             self.logWindowState('scale')
 
+        def _dragTickerWanted(self):
+            return (self._active
+                    and not self._destroyed
+                    and not self._suspended
+                    and self._visible
+                    and self._nativeReady
+                    and self._isWindowUsable())
+
+        def _syncDragTicker(self):
+            if self._dragTickerWanted():
+                self._startDragTicker()
+            else:
+                self._stopDragTicker()
+
         def _startDragTicker(self):
-            if self._dragCallbackID is None:
-                self._dragCallbackID = BigWorld.callback(_DRAG_TICK_HOVER, self._updateDragState)
+            if self._dragCallbackID is not None:
+                return
+            self._dragIdleTicks = 0
+            self._pressArmed = False
+            self._mouseWasDown = True
+            self._dragCallbackID = BigWorld.callback(_DRAG_TICK_HOVER, self._updateDragState)
 
         def _stopDragTicker(self):
             _cancelCallbackSafe(self._dragCallbackID)
             self._dragCallbackID = None
+            if self._dragging:
+                self._finishDrag()
             self._dragging = False
             self._dragMoved = False
             self._mouseWasDown = False
+            self._pressArmed = False
+            self._dragIdleTicks = 0
             self._dragStartCursor = None
             self._dragStartPosition = None
 
         def _updateDragState(self):
             self._dragCallbackID = None
-            if not self._active:
+            if not self._dragTickerWanted():
+                if self._dragging:
+                    self._finishDrag()
+                self._dragging = False
+                self._mouseWasDown = False
+                self._pressArmed = False
                 return
-            interval = _DRAG_TICK_HOVER
-            if self._isWindowUsable():
-                try:
-                    interval = self._handleMouseDrag()
-                except Exception:
-                    logger.exception('[Watch] drag tick failed for %s', self._name)
-            self._dragCallbackID = BigWorld.callback(interval, self._updateDragState)
+            interval = _DRAG_TICK_IDLE
+            try:
+                interval = self._handleMouseDrag()
+            except Exception:
+                logger.exception('[Watch] drag tick failed for %s', self._name)
+            if self._dragCallbackID is None and self._dragTickerWanted():
+                self._dragCallbackID = BigWorld.callback(interval, self._updateDragState)
 
         def _handleMouseDrag(self):
             cursor = GUI.mcursor()
@@ -1248,9 +1473,25 @@ if _GF_OK:
                     self._finishDrag()
                 self._dragging = False
                 self._mouseWasDown = False
+                self._pressArmed = False
+                self._dragIdleTicks += 1
+                if self._dragIdleTicks >= _DRAG_IDLE_GRACE:
+                    return _DRAG_TICK_SLEEP
                 return _DRAG_TICK_IDLE
             mouseDown = BigWorld.isKeyDown(Keys.KEY_LEFTMOUSE)
             cursorPos = _cursorPixels(cursor)
+            if not self._dragging and not self._isCursorNear(cursorPos):
+                self._mouseWasDown = mouseDown
+                self._pressArmed = False
+                self._dragIdleTicks += 1
+                return _DRAG_TICK_IDLE
+            self._dragIdleTicks = 0
+            if not self._pressArmed:
+                if mouseDown:
+                    self._mouseWasDown = True
+                    return _DRAG_TICK_HOVER
+                self._pressArmed = True
+                self._mouseWasDown = False
             if mouseDown and not self._mouseWasDown:
                 over = self._isCursorOver(cursorPos)
                 if logger.isEnabledFor(logging.DEBUG):
@@ -1284,6 +1525,12 @@ if _GF_OK:
             self._flushPosition()
             if moved:
                 self.logWindowState('dragEnd')
+
+        def _isCursorNear(self, cursorPos):
+            left, top = self._position[0], self._position[1]
+            width, height = self._viewSize
+            return (left - _DRAG_NEAR_PAD <= cursorPos[0] <= left + width + _DRAG_NEAR_PAD and
+                    top - _DRAG_NEAR_PAD <= cursorPos[1] <= top + height + _DRAG_NEAR_PAD)
 
         def _isCursorOver(self, cursorPos):
             if not self._visible or not self._isWindowUsable():
@@ -1329,25 +1576,36 @@ if _GF_OK:
             if self._positionLoaded:
                 return
             self._positionLoaded = True
-            self._offset = list(self._getOffset())
-            self._legacyOffset = bool(self._getLegacy())
-            self._lastSaved = (self._offset[0], self._offset[1])
+            defaultOffset, defaultAnchor = self._getDefault()
+            offset, anchor, legacy = list(defaultOffset), list(defaultAnchor), False
+            try:
+                offset, anchor, legacy = self._getState()
+            except Exception:
+                logger.exception('[Watch] failed to read the stored position for %s', self._name)
+            self._offset = list(offset)
+            self._anchor = _toAnchorList(anchor, defaultAnchor)
+            self._legacyOffset = bool(legacy)
+            self._lastSaved = self._savedKey()
             self._positionDirty = False
 
         def _flushPosition(self):
             if not self._positionDirty:
                 return
             self._syncOffsetFromPosition()
-            current = (self._offset[0], self._offset[1])
+            current = self._savedKey()
             if self._lastSaved == current:
                 self._positionDirty = False
                 return
-            self._setOffset([self._offset[0], self._offset[1]])
+            try:
+                self._setState([self._offset[0], self._offset[1]], list(self._anchor))
+            except Exception:
+                logger.exception('[Watch] failed to store the position for %s', self._name)
+                return
             self._lastSaved = current
             self._positionDirty = False
 
-    def _makeOverlay(name, mode, size, getOffset, setOffset, getDefault, getLegacy):
-        return _ClockOverlay(name, mode, size, getOffset, setOffset, getDefault, getLegacy)
+    def _makeOverlay(name, mode, size, getState, setState, getDefault):
+        return _ClockOverlay(name, mode, size, getState, setState, getDefault)
 
 else:
 
@@ -1373,16 +1631,31 @@ else:
         def logWindowState(self, tag):
             pass
 
-    def _makeOverlay(name, mode, size, getOffset, setOffset, getDefault, getLegacy):
+    def _makeOverlay(name, mode, size, getState, setState, getDefault):
         return _NullOverlay()
+
+
+def _battleState():
+    return (list(g_config.battleOffset), list(g_config.battleAnchor), bool(g_config.legacyBattle))
+
+
+def _garageState():
+    return (list(g_config.garageOffset), list(g_config.garageAnchor), bool(g_config.legacyGarage))
+
+
+def _battleDefaults():
+    return (list(_DEFAULT_BATTLE_OFFSET), list(_DEFAULT_BATTLE_ANCHOR))
+
+
+def _garageDefaults():
+    return (list(_DEFAULT_GARAGE_OFFSET), list(_DEFAULT_GARAGE_ANCHOR))
 
 
 class _BattleClock(object):
     def __init__(self):
         self._overlay = _makeOverlay(
             _BATTLE_NAME, 'battle', _BATTLE_SIZE,
-            lambda: g_config.battleOffset, g_config.setBattleOffset,
-            lambda: list(_DEFAULT_BATTLE_OFFSET), lambda: g_config.legacyBattle)
+            _battleState, g_config.setBattleOffset, _battleDefaults)
         self._pageReady = False
         self._guiBound = False
         self._configBound = False
@@ -1391,14 +1664,14 @@ class _BattleClock(object):
 
     def onBattlePageReady(self):
         self._pageReady = True
-        if not (g_configParams.enabled.value and g_configParams.battleEnabled.value):
-            return
         self._hiddenByUI = False
         self._hiddenByStats = False
-        self._overlay.enable()
-        self._overlay.setVisible(True)
         self._bindGUI()
         self._bindConfig()
+        if not (g_configParams.enabled.value and g_configParams.battleEnabled.value):
+            return
+        self._overlay.enable()
+        self._overlay.setVisible(self._isVisible())
 
     def onBattlePageDisposed(self):
         self._pageReady = False
@@ -1482,8 +1755,7 @@ class _GarageClock(object):
     def __init__(self):
         self._overlay = _makeOverlay(
             _GARAGE_NAME, 'garage', _GARAGE_SIZE,
-            lambda: g_config.garageOffset, g_config.setGarageOffset,
-            lambda: list(_DEFAULT_GARAGE_OFFSET), lambda: g_config.legacyGarage)
+            _garageState, g_config.setGarageOffset, _garageDefaults)
         self._stateMachine = None
         self._smCallbackID = None
         self._isGarage = False
@@ -1632,7 +1904,6 @@ class _GarageClock(object):
             if not _isHangarSettled():
                 self._retrySettle()
                 return
-            self._settleWaits = 0
             self._settleFrames = _GARAGE_SETTLE_FRAMES
             self._frameTick()
         except Exception:
@@ -1648,7 +1919,7 @@ class _GarageClock(object):
                 self._frameCbId = BigWorld.callback(_GARAGE_SETTLE_HOLD, self._frameTick)
                 return
             if not _isHangarSettled():
-                logger.error('[Watch] hangar unsettled at commit, waits=%d', self._settleWaits)
+                logger.debug('[Watch] hangar unsettled at commit, waits=%d', self._settleWaits)
                 self._retrySettle()
                 return
             self._commitEnsure()
@@ -1658,6 +1929,7 @@ class _GarageClock(object):
     def _commitEnsure(self):
         if not self._shouldShow():
             return
+        self._settleWaits = 0
         self._overlay.enable()
         self._overlay.setVisible(True)
 
@@ -1752,8 +2024,12 @@ class _WatchMod(object):
     def __init__(self):
         self._battleClock = _BattleClock()
         self._garageClock = _GarageClock()
+        self._eventsBound = False
 
     def init(self):
+        if self._eventsBound:
+            return
+        self._eventsBound = True
         if _GF_OK:
             _installHooks()
         _installScreenResolutionWatcher()
@@ -1765,12 +2041,15 @@ class _WatchMod(object):
         logger.debug('[Watch] Initialized v%s', __version__)
 
     def fini(self):
-        g_playerEvents.onAccountShowGUI -= self._onAccountShowGUI
-        g_playerEvents.onAvatarBecomePlayer -= self._onAvatarBecomePlayer
-        g_playerEvents.onAvatarBecomeNonPlayer -= self._onAvatarBecomeNonPlayer
-        g_playerEvents.onAccountBecomeNonPlayer -= self._onAccountBecomeNonPlayer
-        g_playerEvents.onDisconnected -= self._onDisconnected
+        if self._eventsBound:
+            self._eventsBound = False
+            g_playerEvents.onAccountShowGUI -= self._onAccountShowGUI
+            g_playerEvents.onAvatarBecomePlayer -= self._onAvatarBecomePlayer
+            g_playerEvents.onAvatarBecomeNonPlayer -= self._onAvatarBecomeNonPlayer
+            g_playerEvents.onAccountBecomeNonPlayer -= self._onAccountBecomeNonPlayer
+            g_playerEvents.onDisconnected -= self._onDisconnected
         _restoreHooks()
+        _removeScreenResolutionWatcher()
         self._garageClock.fini()
         self._battleClock.fini()
         g_config.fini()
