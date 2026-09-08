@@ -18,7 +18,7 @@ except Exception:
 logger = logging.getLogger('Watch')
 logger.setLevel(logging.DEBUG if os.path.isfile('.debug_mods') else logging.ERROR)
 
-__version__ = '0.2.6'
+__version__ = '0.2.7'
 __author__ = 'Under_Pressure'
 
 _GF_OK = True
@@ -122,6 +122,8 @@ _LOAD_SETTLE_FRAMES = 2
 _LOAD_RETRY_LIMIT = 100
 _LOAD_RETRY_DELAY = 0.1
 _LOAD_SETTLE_HOLD = 0.1
+_VIEW_READY_TIMEOUT = 25.0
+_VIEW_RECOVERY_LIMIT = 2
 
 _GARAGE_SETTLE_DELAY = 0.35
 _GARAGE_SETTLE_RETRY = 0.35
@@ -621,6 +623,7 @@ class _Config(object):
         self.legacyBattle = False
         self.legacyGarage = False
         self._configEncoding = _CONFIG_ENCODING_UTF8
+        self._configWritable = True
         try:
             self._loadConfig()
         except Exception:
@@ -711,10 +714,13 @@ class _Config(object):
             try:
                 data, self._configEncoding = _loadJsonFile(_CONFIG_PATH)
             except Exception as e:
-                logger.error('[Config] Load failed, restoring defaults: %s', e)
-                data = {}
-                existed = False
-                self._configEncoding = _CONFIG_ENCODING_UTF8
+                logger.error('[Config] Cannot read %s; file preserved, defaults used: %s', _CONFIG_PATH, e)
+                self._configWritable = False
+                return
+            if not isinstance(data, dict):
+                logger.error('[Config] %s must contain an object; file preserved', _CONFIG_PATH)
+                self._configWritable = False
+                return
         try:
             repaired = self._applyData(data)
         except Exception:
@@ -724,6 +730,8 @@ class _Config(object):
             self._saveConfig()
 
     def _saveConfig(self):
+        if not self._configWritable:
+            return
         try:
             if not os.path.exists(WATCH_CONFIG_DIR):
                 os.makedirs(WATCH_CONFIG_DIR)
@@ -751,7 +759,7 @@ class _Config(object):
         try:
             template = {
                 'modDisplayName': _tr('modname', u'Watch Clock'),
-                'enabled': True,
+                'enabled': g_configParams.enabled.value,
                 'column1': [
                     g_configParams.battleEnabled.renderParam(
                         _tr('battleEnabled.header', u'Show in battle'),
@@ -778,8 +786,10 @@ class _Config(object):
                 ]
             }
             settings = g_modsSettingsApi.setModTemplate(MOD_LINKAGE, template, self._onSettingsChanged)
-            if settings:
-                self._applyMsa(settings, save=False)
+            # JSON owns persisted values; MSA may return an older cached copy.
+            current = dict((name, param.msaValue) for name, param in g_configParams.items().items())
+            if settings != current:
+                g_modsSettingsApi.updateModSettings(MOD_LINKAGE, current)
         except Exception as e:
             logger.error('[Config] MSA register failed: %s', e)
 
@@ -865,7 +875,7 @@ if _GF_OK:
 
         def _getEvents(self):
             model = self.getViewModel()
-            return (
+            return super(_ClockView, self)._getEvents() + (
                 (model.onReady, self._onViewReady),
                 (model.onCmd, self._onCmd),
             )
@@ -946,6 +956,8 @@ if _GF_OK:
             self._resizeCallbackID = None
             self._sizeSyncCallbackID = None
             self._loadCallbackID = None
+            self._readyCallbackID = None
+            self._recoveryAttempts = 0
             self._scaleBound = False
             self._suspended = False
             self._parentUid = None
@@ -969,6 +981,7 @@ if _GF_OK:
                 self._syncDragTicker()
                 return
             self._active = True
+            self._recoveryAttempts = 0
             self._visible = True
             self._loadPosition()
             self._bindScaleListener()
@@ -1064,6 +1077,7 @@ if _GF_OK:
 
         def _onReady(self, *args):
             self._nativeReady = True
+            self._checkReady()
             self.publish()
             self._syncPosition()
             self._bindGuiResetter()
@@ -1083,6 +1097,7 @@ if _GF_OK:
                 first = not self._sizeConfirmed
                 changed = (width, height) != tuple(self._viewSize) or pad != self._viewPad
                 self._sizeConfirmed = True
+                self._checkReady()
                 if not first and not changed:
                     return
                 self._viewSize = (width, height)
@@ -1106,6 +1121,30 @@ if _GF_OK:
             self._loggedState = state
             self.logWindowState('onSize')
 
+        def _checkReady(self):
+            if self._nativeReady and self._sizeConfirmed:
+                _cancelCallbackSafe(self._readyCallbackID)
+                self._readyCallbackID = None
+
+        def _onReadyTimeout(self, token):
+            if token != self._token:
+                return
+            self._readyCallbackID = None
+            if not (self._nativeReady and self._sizeConfirmed):
+                self._recoverWindow('view readiness timed out')
+
+        def _recoverWindow(self, reason):
+            self._dropWindow()
+            if not self._active or self._destroyed or self._suspended:
+                return
+            if self._recoveryAttempts >= _VIEW_RECOVERY_LIMIT:
+                logger.error('[Watch:%s] recovery abandoned: %s', self._name, reason)
+                return
+            self._recoveryAttempts += 1
+            logger.error('[Watch:%s] recreating view (%d/%d): %s', self._name,
+                         self._recoveryAttempts, _VIEW_RECOVERY_LIMIT, reason)
+            self._loadCallbackID = BigWorld.callback(_LOAD_RETRY_DELAY, self._ensureWindow)
+
         def _onViewFinalized(self, token=None):
             logger.debug('[Watch:%s] view finalized token=%s current=%s', self._name, token, self._token)
             if token is not None and token != self._token:
@@ -1122,6 +1161,7 @@ if _GF_OK:
             self._parentUid = None
             self._token += 1
             self._stopDragTicker()
+            self._recoverWindow('view finalized while active')
 
         def _isWindowUsable(self):
             if self._destroyed or self._window is None:
@@ -1210,6 +1250,9 @@ if _GF_OK:
                 self._parentUid = getattr(parent, 'uniqueID', None)
                 self._window = _ClockWindow(_ClockView(self), parent, self._name, self._windowLayer())
                 self._window.load()
+                if not (self._nativeReady and self._sizeConfirmed):
+                    self._readyCallbackID = BigWorld.callback(
+                        _VIEW_READY_TIMEOUT, lambda: self._onReadyTimeout(token))
             except Exception:
                 logger.exception('[Watch] Failed to load overlay %s', self._name)
                 self._window = None
@@ -1219,6 +1262,8 @@ if _GF_OK:
 
         def _dropWindow(self):
             self._unbindGuiResetter()
+            _cancelCallbackSafe(self._readyCallbackID)
+            self._readyCallbackID = None
             _cancelCallbackSafe(self._sizeSyncCallbackID)
             self._sizeSyncCallbackID = None
             _cancelCallbackSafe(self._loadCallbackID)
@@ -2095,4 +2140,3 @@ def fini():
         _g_WatchMod.fini()
     except Exception:
         logger.exception('[Watch] Failed to finalize')
-

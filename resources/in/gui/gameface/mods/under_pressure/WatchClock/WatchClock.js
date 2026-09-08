@@ -39,6 +39,12 @@
     var clockTimer = null;
     var started = false;
     var engineBound = false;
+    var modelCallbackId = null;
+    var startupTimer = null;
+    var startupAttempts = 0;
+    var engineWaitBound = false;
+    var engineReady = false;
+    var disposed = false;
 
     function pad(n) {
         return n < 10 ? '0' + n : '' + n;
@@ -52,8 +58,10 @@
         try {
             if (window.model && typeof window.model.onCmd === 'function') {
                 window.model.onCmd({ name: String(name), value: String(value) });
+                return true;
             }
         } catch (e) {}
+        return false;
     }
 
     function uiScale() {
@@ -190,8 +198,9 @@
             }
             return;
         }
-        lastReportedSize = key;
-        cmd('onSize', key);
+        if (cmd('onSize', key)) {
+            lastReportedSize = key;
+        }
     }
 
     function scheduleMeasure() {
@@ -397,6 +406,7 @@
         window.engine.on('viewEnv.onDataChanged', onModelChanged);
         window.engine.on('self.onScaleUpdated', onGeometryEvent);
         window.engine.on('clientResized', onGeometryEvent);
+        modelCallbackId = viewEnv.addDataChangedCallback('model', 0, true);
     }
 
     function unbindEngine() {
@@ -404,6 +414,12 @@
             return;
         }
         engineBound = false;
+        if (modelCallbackId !== null) {
+            try {
+                viewEnv.removeDataChangedCallback(modelCallbackId, 0);
+            } catch (e) {}
+            modelCallbackId = null;
+        }
         try {
             window.engine.off('viewEnv.onDataChanged', onModelChanged);
             window.engine.off('self.onScaleUpdated', onGeometryEvent);
@@ -421,7 +437,12 @@
     }
 
     function teardown() {
+        disposed = true;
         started = false;
+        if (startupTimer !== null) {
+            window.clearTimeout(startupTimer);
+            startupTimer = null;
+        }
         stopClock();
         cancelMeasure();
         if (resizeRetryTimer !== null) {
@@ -432,7 +453,7 @@
     }
 
     function initialize() {
-        if (started) {
+        if (started || disposed) {
             return;
         }
         started = true;
@@ -440,20 +461,42 @@
         applyAll();
         scheduleMeasure();
         scheduleClock();
-        try {
-            if (window.addEventListener) {
-                window.addEventListener('unload', teardown);
-            }
-        } catch (e) {}
         if (window.model && typeof window.model.onReady === 'function') {
             window.model.onReady({});
         }
     }
 
-    function afterFrames() {
-        requestAnimationFrame(function () {
-            requestAnimationFrame(initialize);
-        });
+    function waitForBridge() {
+        startupTimer = null;
+        if (disposed || started) {
+            return;
+        }
+        if (!engineWaitBound && window.engine && window.engine.whenReady) {
+            engineWaitBound = true;
+            window.engine.whenReady.then(function () {
+                engineReady = true;
+            });
+        }
+        // The engine, DOM injection and model commands become ready separately.
+        // Never treat a timeout or an animation frame as bridge readiness.
+        if (engineReady && window.isDomBuilt && window.model
+                && typeof window.model.onReady === 'function'
+                && typeof window.model.onCmd === 'function'
+                && window.viewEnv && viewEnv.addDataChangedCallback && viewEnv.resizeViewPx) {
+            try {
+                initialize();
+            } catch (e) {
+                console.warn('[Watch] initialization failed: ' + e);
+                teardown();
+            }
+            return;
+        }
+        startupAttempts += 1;
+        if (startupAttempts >= 200) {
+            console.warn('[Watch] Gameface bridge was not ready within 20 seconds');
+            return;
+        }
+        startupTimer = window.setTimeout(waitForBridge, 100);
     }
 
     applyMode();
@@ -462,15 +505,8 @@
     applyScale();
     renderClock();
     applyShift();
-    reportSize();
-
-    if (window.engine && window.engine.whenReady) {
-        var domReady = window.isDomBuilt ? Promise.resolve() : new Promise(function (resolve) {
-            window.engine.on('self.onDomBuilt', resolve);
-            window.setTimeout(resolve, 1000);
-        });
-        Promise.all([window.engine.whenReady, domReady]).then(afterFrames);
-    } else {
-        afterFrames();
+    if (window.addEventListener) {
+        window.addEventListener('unload', teardown);
     }
+    waitForBridge();
 }());
