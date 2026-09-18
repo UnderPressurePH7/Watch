@@ -7,6 +7,8 @@
     var CLOCK_PERIOD_SEC = 1000;
     var CLOCK_PERIOD_MIN = 60000;
     var CLOCK_GUARD = 20;
+    var MODEL_WAIT_ATTEMPTS = 100;
+    var RESIZE_RETRY_LIMIT = 20;
 
     var root = document.getElementById('watch-root');
     var content = document.getElementById('watch-content');
@@ -36,14 +38,15 @@
 
     var measureFrame = null;
     var resizeRetryTimer = null;
+    var resizeRetryCount = 0;
     var clockTimer = null;
     var started = false;
     var engineBound = false;
     var modelCallbackId = null;
+    var modelPollTimer = null;
     var startupTimer = null;
-    var startupAttempts = 0;
-    var engineWaitBound = false;
-    var engineReady = false;
+    var modelWaitAttempts = 0;
+    var lastStage = null;
     var disposed = false;
 
     function pad(n) {
@@ -62,6 +65,15 @@
             }
         } catch (e) {}
         return false;
+    }
+
+    function reportStage(stage) {
+        if (stage === lastStage) {
+            return;
+        }
+        if (cmd('stage', stage)) {
+            lastStage = stage;
+        }
     }
 
     function uiScale() {
@@ -152,6 +164,7 @@
             h = content.offsetHeight || 0;
         }
         if (w < 2 || h < 2) {
+            reportStage('size-zero');
             return;
         }
         w = Math.max(1, Math.ceil(w));
@@ -189,18 +202,26 @@
                 applied = true;
             }
         } catch (e) {}
-        if (!applied) {
-            if (resizeRetryTimer === null) {
-                resizeRetryTimer = window.setTimeout(function () {
-                    resizeRetryTimer = null;
-                    reportSize();
-                }, 250);
+        if (cmd('onSize', key)) {
+            lastReportedSize = key;
+            reportStage('size');
+        }
+        if (applied) {
+            resizeRetryCount = 0;
+            return;
+        }
+        if (resizeRetryTimer !== null || resizeRetryCount >= RESIZE_RETRY_LIMIT) {
+            if (resizeRetryCount >= RESIZE_RETRY_LIMIT) {
+                reportStage('resize-unavailable');
             }
             return;
         }
-        if (cmd('onSize', key)) {
-            lastReportedSize = key;
-        }
+        resizeRetryCount += 1;
+        resizeRetryTimer = window.setTimeout(function () {
+            resizeRetryTimer = null;
+            lastReportedSize = null;
+            reportSize();
+        }, 250);
     }
 
     function scheduleMeasure() {
@@ -403,28 +424,43 @@
             return;
         }
         engineBound = true;
-        window.engine.on('viewEnv.onDataChanged', onModelChanged);
-        window.engine.on('self.onScaleUpdated', onGeometryEvent);
-        window.engine.on('clientResized', onGeometryEvent);
-        modelCallbackId = viewEnv.addDataChangedCallback('model', 0, true);
+        try { window.engine.on('viewEnv.onDataChanged', onModelChanged); } catch (e) {}
+        try { window.engine.on('self.onScaleUpdated', onGeometryEvent); } catch (e) {}
+        try { window.engine.on('clientResized', onGeometryEvent); } catch (e) {}
+        try {
+            if (window.viewEnv && viewEnv.addDataChangedCallback) {
+                modelCallbackId = viewEnv.addDataChangedCallback('model', 0, true);
+            }
+        } catch (e) {}
+        if (modelCallbackId === null || modelCallbackId === undefined) {
+            modelCallbackId = null;
+            reportStage('poll-fallback');
+            modelPollTimer = window.setInterval(onModelChanged, 500);
+        }
     }
 
     function unbindEngine() {
-        if (!engineBound || !window.engine) {
+        if (!engineBound) {
             return;
         }
         engineBound = false;
+        if (modelPollTimer !== null) {
+            window.clearInterval(modelPollTimer);
+            modelPollTimer = null;
+        }
         if (modelCallbackId !== null) {
             try {
                 viewEnv.removeDataChangedCallback(modelCallbackId, 0);
             } catch (e) {}
             modelCallbackId = null;
         }
-        try {
-            window.engine.off('viewEnv.onDataChanged', onModelChanged);
-            window.engine.off('self.onScaleUpdated', onGeometryEvent);
-            window.engine.off('clientResized', onGeometryEvent);
-        } catch (e) {}
+        if (window.engine) {
+            try {
+                window.engine.off('viewEnv.onDataChanged', onModelChanged);
+                window.engine.off('self.onScaleUpdated', onGeometryEvent);
+                window.engine.off('clientResized', onGeometryEvent);
+            } catch (e) {}
+        }
     }
 
     function applyAll() {
@@ -457,46 +493,67 @@
             return;
         }
         started = true;
+        reportStage('init');
         bindEngine();
         applyAll();
         scheduleMeasure();
         scheduleClock();
         if (window.model && typeof window.model.onReady === 'function') {
             window.model.onReady({});
+            reportStage('ready');
         }
     }
 
-    function waitForBridge() {
+    function afterFrames() {
+        requestAnimationFrame(function () {
+            requestAnimationFrame(waitForModel);
+        });
+    }
+
+    function waitForModel() {
         startupTimer = null;
         if (disposed || started) {
             return;
         }
-        if (!engineWaitBound && window.engine && window.engine.whenReady) {
-            engineWaitBound = true;
-            window.engine.whenReady.then(function () {
-                engineReady = true;
-            });
-        }
-        // The engine, DOM injection and model commands become ready separately.
-        // Never treat a timeout or an animation frame as bridge readiness.
-        if (engineReady && window.isDomBuilt && window.model
-                && typeof window.model.onReady === 'function'
-                && typeof window.model.onCmd === 'function'
-                && window.viewEnv && viewEnv.addDataChangedCallback && viewEnv.resizeViewPx) {
+        reportStage('dom');
+        if (window.model && typeof window.model.onReady === 'function') {
             try {
                 initialize();
             } catch (e) {
-                console.warn('[Watch] initialization failed: ' + e);
+                reportStage('init-failed');
                 teardown();
             }
             return;
         }
-        startupAttempts += 1;
-        if (startupAttempts >= 200) {
-            console.warn('[Watch] Gameface bridge was not ready within 20 seconds');
+        modelWaitAttempts += 1;
+        if (modelWaitAttempts > MODEL_WAIT_ATTEMPTS) {
+            reportStage('model-missing');
             return;
         }
-        startupTimer = window.setTimeout(waitForBridge, 100);
+        startupTimer = window.setTimeout(waitForModel, 100);
+    }
+
+    function startBootstrap() {
+        reportStage('script');
+        try {
+            var domReady;
+            if (window.isDomBuilt) {
+                domReady = Promise.resolve();
+            } else if (window.engine && window.engine.on) {
+                domReady = new Promise(function (resolve) {
+                    window.engine.on('self.onDomBuilt', resolve);
+                });
+            } else {
+                domReady = Promise.resolve();
+            }
+            if (window.engine && window.engine.whenReady) {
+                Promise.all([window.engine.whenReady, domReady]).then(afterFrames, afterFrames);
+            } else {
+                domReady.then(afterFrames, afterFrames);
+            }
+        } catch (e) {
+            afterFrames();
+        }
     }
 
     applyMode();
@@ -508,5 +565,5 @@
     if (window.addEventListener) {
         window.addEventListener('unload', teardown);
     }
-    waitForBridge();
+    startBootstrap();
 }());

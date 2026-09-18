@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import json
 import logging
 import os
@@ -16,9 +17,9 @@ except Exception:
     _CLIENT_LANG = 'en'
 
 logger = logging.getLogger('Watch')
-logger.setLevel(logging.DEBUG if os.path.isfile('.debug_mods') else logging.ERROR)
+logger.setLevel(logging.DEBUG if os.path.isfile('.debug_mods') else logging.INFO)
 
-__version__ = '0.2.7'
+__version__ = '0.2.8'
 __author__ = 'Under_Pressure'
 
 _GF_OK = True
@@ -35,13 +36,8 @@ except Exception:
     _GF_OK = False
     logger.error('[Watch] openwg_gameface is required. Get it at https://gitlab.com/openwg/wot.gameface', exc_info=True)
 
-_WINDOW_BUSY_STATUSES = ()
 _WINDOW_DEAD_STATUSES = ()
 if _GF_OK:
-    _WINDOW_BUSY_STATUSES = tuple(status for status in (getattr(WindowStatus, 'CREATED', None),
-                                                        getattr(WindowStatus, 'LOADING', None),
-                                                        getattr(WindowStatus, 'DESTROYING', None))
-                                  if status is not None)
     _WINDOW_DEAD_STATUSES = tuple(status for status in (getattr(WindowStatus, 'DESTROYING', None),
                                                         getattr(WindowStatus, 'DESTROYED', None))
                                   if status is not None)
@@ -84,6 +80,13 @@ except Exception:
     _APP_STATE_OK = False
     IAppLoader = APP_NAME_SPACE = ApplicationStateID = None
 
+_GUI_SPACE_OK = True
+try:
+    from skeletons.gui.app_loader import GuiGlobalSpaceID
+except Exception:
+    _GUI_SPACE_OK = False
+    GuiGlobalSpaceID = None
+
 WATCH_CONFIG_DIR = os.path.join('mods', 'configs', 'under_pressure')
 _CONFIG_PATH = os.path.join(WATCH_CONFIG_DIR, 'watch.json')
 _CONFIG_ENCODING_UTF8 = 'utf-8'
@@ -119,10 +122,10 @@ _DRAG_IDLE_GRACE = 4
 _DRAG_NEAR_PAD = 200
 
 _LOAD_SETTLE_FRAMES = 2
-_LOAD_RETRY_LIMIT = 100
+_LOAD_RETRY_LIMIT = 600
 _LOAD_RETRY_DELAY = 0.1
 _LOAD_SETTLE_HOLD = 0.1
-_VIEW_READY_TIMEOUT = 25.0
+_VIEW_READY_TIMEOUT = 30.0
 _VIEW_RECOVERY_LIMIT = 2
 
 _GARAGE_SETTLE_DELAY = 0.35
@@ -252,35 +255,27 @@ def _isHangarSpaceReady():
     except Exception:
         return True
 
-
-def _isWindowBusy(window):
-    try:
-        return window.windowStatus in _WINDOW_BUSY_STATUSES
-    except Exception:
-        return False
-
-
-def _isHangarSettled():
+def _hangarSettleBlocker():
     if not _isHangarSpaceReady():
-        return False
+        return 'space'
     try:
         manager = dependency.instance(IGuiLoader).windowsManager
         main = manager.getMainWindow()
     except Exception:
-        return False
+        return 'manager'
     if main is None or getattr(main, 'proxy', None) is None:
-        return False
+        return 'mainWindow'
     try:
-        if main.windowStatus != WindowStatus.LOADED:
-            return False
+        status = getattr(main, 'windowStatus', None)
     except Exception:
-        return False
-    if not _WINDOW_BUSY_STATUSES:
-        return True
-    try:
-        return not manager.findWindows(_isWindowBusy)
-    except Exception:
-        return True
+        status = None
+    if status != WindowStatus.LOADED:
+        return 'mainStatus=%s' % (status,)
+    return None
+
+
+def _isHangarSettled():
+    return _hangarSettleBlocker() is None
 
 
 def _isHostAppInitialized(mode):
@@ -291,6 +286,27 @@ def _isHostAppInitialized(mode):
         return dependency.instance(IAppLoader).getAppStateID(ns) == ApplicationStateID.INITIALIZED
     except Exception:
         return None
+
+
+def _guiSpaceID():
+    if IAppLoader is None:
+        return None
+    try:
+        appLoader = dependency.instance(IAppLoader)
+        if appLoader is None:
+            return None
+        return appLoader.getSpaceID()
+    except Exception:
+        return None
+
+def _isSpaceEntered(mode):
+    if not _GUI_SPACE_OK or GuiGlobalSpaceID is None:
+        return None
+    spaceID = _guiSpaceID()
+    if spaceID is None:
+        return None
+    wanted = GuiGlobalSpaceID.BATTLE if mode == 'battle' else GuiGlobalSpaceID.LOBBY
+    return spaceID == wanted
 
 
 def _dayNames():
@@ -786,7 +802,6 @@ class _Config(object):
                 ]
             }
             settings = g_modsSettingsApi.setModTemplate(MOD_LINKAGE, template, self._onSettingsChanged)
-            # JSON owns persisted values; MSA may return an older cached copy.
             current = dict((name, param.msaValue) for name, param in g_configParams.items().items())
             if settings != current:
                 g_modsSettingsApi.updateModSettings(MOD_LINKAGE, current)
@@ -958,6 +973,8 @@ if _GF_OK:
             self._loadCallbackID = None
             self._readyCallbackID = None
             self._recoveryAttempts = 0
+            self._lastStage = None
+            self._lastFailure = None
             self._scaleBound = False
             self._suspended = False
             self._parentUid = None
@@ -982,6 +999,7 @@ if _GF_OK:
                 return
             self._active = True
             self._recoveryAttempts = 0
+            self._lastFailure = None
             self._visible = True
             self._loadPosition()
             self._bindScaleListener()
@@ -1077,6 +1095,7 @@ if _GF_OK:
 
         def _onReady(self, *args):
             self._nativeReady = True
+            self._lastFailure = None
             self._checkReady()
             self.publish()
             self._syncPosition()
@@ -1085,6 +1104,13 @@ if _GF_OK:
             self.logWindowState('ready')
 
         def _onCommand(self, name, value):
+            if name == 'stage':
+                try:
+                    self._lastStage = unicode(value)
+                    logger.info('[Watch:%s] stage=%s', self._name, self._lastStage)
+                except Exception:
+                    pass
+                return
             if name == 'onSize':
                 try:
                     parts = unicode(value).split(u'@')
@@ -1126,16 +1152,46 @@ if _GF_OK:
                 _cancelCallbackSafe(self._readyCallbackID)
                 self._readyCallbackID = None
 
+        def _failureReason(self):
+            stage = self._lastStage
+            native = self._nativeReady
+            size = self._sizeConfirmed
+            if stage is None:
+                label = 'DOC_NOT_LOADED'
+            elif stage in ('script', 'dom'):
+                label = 'JS_NOT_READY'
+            elif stage == 'model-missing':
+                label = 'MODEL_NOT_BOUND'
+            elif stage == 'init-failed':
+                label = 'JS_INIT_FAILED'
+            elif native and not size:
+                label = 'SIZE_NOT_REPORTED'
+            else:
+                label = 'VIEW_NOT_READY'
+            return '%s (stage=%s, native=%s, size=%s)' % (label, stage, native, size)
+
         def _onReadyTimeout(self, token):
             if token != self._token:
                 return
             self._readyCallbackID = None
-            if not (self._nativeReady and self._sizeConfirmed):
-                self._recoverWindow('view readiness timed out')
+            if self._nativeReady and self._sizeConfirmed:
+                return
+            if self._nativeReady:
+                logger.warning('[Watch:%s] %s, keeping default size %s',
+                               self._name, self._failureReason(), self._viewSize)
+                return
+            self._recoverWindow(self._failureReason())
 
         def _recoverWindow(self, reason):
+            signature = (reason, self._lastStage)
+            repeated = self._lastFailure is not None and self._lastFailure == signature
+            self._lastFailure = signature
             self._dropWindow()
             if not self._active or self._destroyed or self._suspended:
+                return
+            if repeated:
+                logger.error('[Watch:%s] recovery stopped, identical failure repeated: %s',
+                             self._name, reason)
                 return
             if self._recoveryAttempts >= _VIEW_RECOVERY_LIMIT:
                 logger.error('[Watch:%s] recovery abandoned: %s', self._name, reason)
@@ -1213,11 +1269,12 @@ if _GF_OK:
             if appReady is False:
                 self._retryLoad(token, retry, 'host app not initialized')
                 return
+            if _isSpaceEntered(self._mode) is False:
+                self._retryLoad(token, retry, 'SPACE_NOT_READY (spaceID=%s)' % (_guiSpaceID(),))
+                return
             try:
-                manager = dependency.instance(IGuiLoader).windowsManager
-                parent = manager.getMainWindow()
+                parent = dependency.instance(IGuiLoader).windowsManager.getMainWindow()
             except Exception:
-                manager = None
                 parent = None
             if parent is None or parent.proxy is None or parent.windowStatus != WindowStatus.LOADED:
                 self._retryLoad(token, retry, 'main window not loaded')
@@ -1230,15 +1287,6 @@ if _GF_OK:
                     allowed = False
                 if not allowed:
                     self._retryLoad(token, retry, 'parent gate closed')
-                    return
-            if self._mode == 'garage' and manager is not None and _WINDOW_BUSY_STATUSES:
-                try:
-                    busy = bool(manager.findWindows(
-                        lambda window: getattr(window, 'windowStatus', None) in _WINDOW_BUSY_STATUSES))
-                except Exception:
-                    busy = False
-                if busy:
-                    self._retryLoad(token, retry, 'lobby still busy')
                     return
             if self._settleFrames > 0:
                 self._settleFrames -= 1
@@ -1274,6 +1322,7 @@ if _GF_OK:
             self._model = None
             self._nativeReady = False
             self._sizeConfirmed = False
+            self._lastStage = None
             self._stableScale = None
             self._scaleSample = None
             self._parentUid = None
@@ -1936,7 +1985,11 @@ class _GarageClock(object):
     def _retrySettle(self):
         self._settleWaits += 1
         if self._settleWaits > _GARAGE_SETTLE_MAX_WAITS:
-            logger.error('[Watch] garage settle budget exhausted, reason=%s', self._ensureReason)
+            elapsed = _GARAGE_SETTLE_MAX_WAITS * _GARAGE_SETTLE_RETRY
+            logger.error('[Watch] garage settle budget exhausted after %.1fs, request=%s, '
+                         'blocker=%s; creating overlay in degraded mode',
+                         elapsed, self._ensureReason, _hangarSettleBlocker())
+            self._commitEnsure()
             return False
         self._scheduleSettle(_GARAGE_SETTLE_RETRY)
         return True
