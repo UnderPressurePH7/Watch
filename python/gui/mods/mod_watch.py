@@ -26,15 +26,20 @@ _GF_OK = True
 try:
     import GUI
     import Keys
-    from openwg_gameface import ModDynAccessor, manager as gamefaceResMap, on_ready as gamefaceOnReady
     from frameworks.wulf import ViewFlags, ViewModel, ViewSettings, WindowFlags, WindowLayer, WindowStatus
+    from gui.impl.gen import R
     from gui.impl.pub import ViewImpl, WindowImpl
     from gui.impl.gui_decorators import args2params
     from helpers import dependency
     from skeletons.gui.impl import IGuiLoader
+    # Declared natively in res/gui/gen_resources/me.under_pressure.watch.json (WoT 2.4.1+)
+    _LAYOUTS = {
+        'WatchBattle': R.mods.under_pressure.watch.views.WatchBattle,
+        'WatchGarage': R.mods.under_pressure.watch.views.WatchGarage,
+    }
 except Exception:
     _GF_OK = False
-    logger.error('[Watch] openwg_gameface is required. Get it at https://gitlab.com/openwg/wot.gameface', exc_info=True)
+    logger.error('[Watch] Gameface API unavailable; UI disabled', exc_info=True)
 
 _WINDOW_DEAD_STATUSES = ()
 if _GF_OK:
@@ -937,7 +942,7 @@ if _GF_OK:
             self._getState = getState
             self._setState = setState
             self._getDefault = getDefault
-            self._layout = ModDynAccessor('mods/under_pressure/%s/layoutID' % name)
+            self._layout = _LAYOUTS[name]
             self._window = None
             self._model = None
             self._token = 0
@@ -1245,15 +1250,12 @@ if _GF_OK:
                 self._dropWindow()
             _cancelCallbackSafe(self._loadCallbackID)
             self._loadCallbackID = None
-            if gamefaceResMap is None:
+            if self.layoutID() < 0:
+                logger.error('[Watch:%s] layout is not registered (gen_resources missing?)', self._name)
                 return
             self._token += 1
             self._settleFrames = _LOAD_SETTLE_FRAMES
-            token = self._token
-            if gamefaceResMap.isResMapValidated:
-                self._load(token)
-            else:
-                gamefaceOnReady(lambda: self._load(token))
+            self._load(self._token)
 
         def _retryLoad(self, token, retry, reason):
             if retry >= _LOAD_RETRY_LIMIT:
@@ -1861,6 +1863,8 @@ class _GarageClock(object):
         self._ensureReason = None
         self._hangarSpaceBound = False
         self._gateBound = False
+        self._lobbyBound = False
+        self._hiddenByLobby = False
 
     def bind(self, retry=0):
         _cancelCallbackSafe(self._smCallbackID)
@@ -1881,11 +1885,13 @@ class _GarageClock(object):
             self._gateBound = True
             self._overlay.parentGate = self._isParentReady
         self._bindHangarSpace()
+        self._bindLobby()
         self._onVisibleRouteChanged(getattr(stateMachine, 'visibleRouteInfo', None))
 
     def unbind(self):
         self._cancelSettle()
         self._unbindHangarSpace()
+        self._unbindLobby()
         if self._smCallbackID is not None:
             _cancelCallbackSafe(self._smCallbackID)
             self._smCallbackID = None
@@ -2029,6 +2035,40 @@ class _GarageClock(object):
             return
         self._settleWaits = 0
         self._overlay.enable()
+        self._overlay.setVisible(not self._hiddenByLobby)
+
+    def _bindLobby(self):
+        if self._lobbyBound:
+            return
+        try:
+            g_eventBus.addListener(GameEvent.HIDE_LOBBY_SUB_CONTAINER_ITEMS, self._onLobbyHidden,
+                                   scope=EVENT_BUS_SCOPE.GLOBAL)
+            g_eventBus.addListener(GameEvent.REVEAL_LOBBY_SUB_CONTAINER_ITEMS, self._onLobbyRevealed,
+                                   scope=EVENT_BUS_SCOPE.GLOBAL)
+        except Exception:
+            logger.exception('[Watch] failed to bind lobby visibility events')
+            return
+        self._lobbyBound = True
+
+    def _unbindLobby(self):
+        self._hiddenByLobby = False
+        if not self._lobbyBound:
+            return
+        self._lobbyBound = False
+        try:
+            g_eventBus.removeListener(GameEvent.HIDE_LOBBY_SUB_CONTAINER_ITEMS, self._onLobbyHidden,
+                                      scope=EVENT_BUS_SCOPE.GLOBAL)
+            g_eventBus.removeListener(GameEvent.REVEAL_LOBBY_SUB_CONTAINER_ITEMS, self._onLobbyRevealed,
+                                      scope=EVENT_BUS_SCOPE.GLOBAL)
+        except Exception:
+            logger.exception('[Watch] failed to unbind lobby visibility events')
+
+    def _onLobbyHidden(self, *_):
+        self._hiddenByLobby = True
+        self._overlay.setVisible(False)
+
+    def _onLobbyRevealed(self, *_):
+        self._hiddenByLobby = False
         self._overlay.setVisible(True)
 
     def _bindHangarSpace(self):
