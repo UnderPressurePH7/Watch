@@ -261,7 +261,8 @@ def build_python(config: AppConfig) -> None:
             )
             logger.info('Python compiled: %s', file_path)
         except subprocess.CalledProcessError as e:
-            logger.error('Python fail compile: %s\n%s', file_path, e.output)
+            # Packaging drops .py sources, so a failed compile would ship a mod without this module
+            raise RuntimeError(f'Python fail compile: {file_path}\n{e.output}') from e
 
 
 GEN_RESOURCES_DIR = pathlib.Path('resources/in/gui/gen_resources')

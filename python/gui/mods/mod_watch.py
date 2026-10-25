@@ -19,7 +19,7 @@ except Exception:
 logger = logging.getLogger('Watch')
 logger.setLevel(logging.DEBUG if os.path.isfile('.debug_mods') else logging.INFO)
 
-__version__ = '0.2.8'
+__version__ = '0.2.9'
 __author__ = 'Under_Pressure'
 
 _GF_OK = True
@@ -66,11 +66,6 @@ try:
     from gui.Scaleform.daapi.view.battle.shared.page import SharedPage
 except Exception:
     SharedPage = None
-
-try:
-    from gui.Scaleform.daapi.view.battle.shared.ingame_menu import IngameMenu
-except Exception:
-    IngameMenu = None
 
 try:
     from gui.impl.lobby.hangar.states import DefaultHangarState, LegacyHangarState
@@ -432,7 +427,7 @@ def _readScheme(value, default):
         return default
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         logger.error('[Config] bad anchor scheme %r, assuming %s', value, default)
         return default
 
@@ -666,21 +661,19 @@ class _Config(object):
 
     def _setAnchoredOffset(self, mode, offset, anchor):
         if mode == 'battle':
-            newOffset = _toOffsetList(offset, _DEFAULT_BATTLE_OFFSET)
-            newAnchor = list(self.battleAnchor) if anchor is None else _toAnchorList(anchor, self.battleAnchor)
-            if newOffset == self.battleOffset and newAnchor == self.battleAnchor and not self.legacyBattle:
-                return
-            self.battleOffset = newOffset
-            self.battleAnchor = newAnchor
-            self.legacyBattle = False
+            offsetAttr, anchorAttr, legacyAttr = 'battleOffset', 'battleAnchor', 'legacyBattle'
+            defaultOffset = _DEFAULT_BATTLE_OFFSET
         else:
-            newOffset = _toOffsetList(offset, _DEFAULT_GARAGE_OFFSET)
-            newAnchor = list(self.garageAnchor) if anchor is None else _toAnchorList(anchor, self.garageAnchor)
-            if newOffset == self.garageOffset and newAnchor == self.garageAnchor and not self.legacyGarage:
-                return
-            self.garageOffset = newOffset
-            self.garageAnchor = newAnchor
-            self.legacyGarage = False
+            offsetAttr, anchorAttr, legacyAttr = 'garageOffset', 'garageAnchor', 'legacyGarage'
+            defaultOffset = _DEFAULT_GARAGE_OFFSET
+        currentAnchor = getattr(self, anchorAttr)
+        newOffset = _toOffsetList(offset, defaultOffset)
+        newAnchor = list(currentAnchor) if anchor is None else _toAnchorList(anchor, currentAnchor)
+        if newOffset == getattr(self, offsetAttr) and newAnchor == currentAnchor and not getattr(self, legacyAttr):
+            return
+        setattr(self, offsetAttr, newOffset)
+        setattr(self, anchorAttr, newAnchor)
+        setattr(self, legacyAttr, False)
         self._saveConfig()
 
     def _readMode(self, data, prefix, globalScheme, defaultOffset, defaultAnchor):
@@ -981,7 +974,6 @@ if _GF_OK:
             self._lastStage = None
             self._lastFailure = None
             self._scaleBound = False
-            self._suspended = False
             self._parentUid = None
             self._settleFrames = 0
             self.parentGate = None
@@ -999,7 +991,7 @@ if _GF_OK:
             self._destroyed = False
             if self._active:
                 self._ensureWindow()
-                self.refresh()
+                self.publish()
                 self._syncDragTicker()
                 return
             self._active = True
@@ -1013,29 +1005,12 @@ if _GF_OK:
 
         def disable(self):
             self._active = False
-            self._suspended = False
             self._stopDragTicker()
             self._unbindScaleListener()
             self._flushPosition()
             self._destroyed = True
             self._positionLoaded = False
             self._dropWindow()
-
-        def suspend(self):
-            if self._suspended:
-                return
-            self._suspended = True
-            self._stopDragTicker()
-            self._flushPosition()
-            self._dropWindow()
-
-        def resume(self):
-            if not self._suspended:
-                return
-            self._suspended = False
-            if self._active and not self._destroyed:
-                self._ensureWindow()
-            self._syncDragTicker()
 
         def setVisible(self, value):
             value = bool(value)
@@ -1044,9 +1019,6 @@ if _GF_OK:
             self._visible = value
             self.publish()
             self._syncDragTicker()
-
-        def refresh(self):
-            self.publish()
 
         def _setModel(self, model, publish=True):
             self._model = model
@@ -1192,7 +1164,7 @@ if _GF_OK:
             repeated = self._lastFailure is not None and self._lastFailure == signature
             self._lastFailure = signature
             self._dropWindow()
-            if not self._active or self._destroyed or self._suspended:
+            if not self._active or self._destroyed:
                 return
             if repeated:
                 logger.error('[Watch:%s] recovery stopped, identical failure repeated: %s',
@@ -1235,7 +1207,7 @@ if _GF_OK:
                 return False
 
         def _ensureWindow(self):
-            if self._destroyed or self._suspended:
+            if self._destroyed:
                 return
             if self._window is not None:
                 if self._parentUid is None:
@@ -1265,7 +1237,7 @@ if _GF_OK:
 
         def _load(self, token, retry=0):
             self._loadCallbackID = None
-            if token != self._token or self._destroyed or self._suspended or self._window is not None:
+            if token != self._token or self._destroyed or self._window is not None:
                 return
             appReady = _isHostAppInitialized(self._mode)
             if appReady is False:
@@ -1305,9 +1277,11 @@ if _GF_OK:
                         _VIEW_READY_TIMEOUT, lambda: self._onReadyTimeout(token))
             except Exception:
                 logger.exception('[Watch] Failed to load overlay %s', self._name)
+                window = self._window
                 self._window = None
                 self._model = None
                 self._parentUid = None
+                _destroyWindowSafe(window)
                 return
 
         def _dropWindow(self):
@@ -1513,7 +1487,6 @@ if _GF_OK:
         def _dragTickerWanted(self):
             return (self._active
                     and not self._destroyed
-                    and not self._suspended
                     and self._visible
                     and self._nativeReady
                     and self._isWindowUsable())
@@ -1715,18 +1688,6 @@ else:
         def setVisible(self, value):
             pass
 
-        def refresh(self):
-            pass
-
-        def suspend(self):
-            pass
-
-        def resume(self):
-            pass
-
-        def logWindowState(self, tag):
-            pass
-
     def _makeOverlay(name, mode, size, getState, setState, getDefault):
         return _NullOverlay()
 
@@ -1774,12 +1735,6 @@ class _BattleClock(object):
         self._unbindGUI()
         self._unbindConfig()
         self._overlay.disable()
-
-    def suspend(self):
-        self._overlay.suspend()
-
-    def resume(self):
-        self._overlay.resume()
 
     def fini(self):
         self.onBattlePageDisposed()
@@ -1910,7 +1865,6 @@ class _GarageClock(object):
         self._isGarage = False
 
     def disable(self):
-        self._cancelSettle()
         self.unbind()
         self._overlay.disable()
 

@@ -1,8 +1,5 @@
 {
     "modname": "Watch Clock",
-    "checked": "enabled",
-    "unchecked": "disabled",
-    "defaultValue": "default",
     "battleEnabled.header": "Show in battle",
     "battleEnabled.body": "Display clock during battle",
     "garageEnabled.header": "Show in garage",
