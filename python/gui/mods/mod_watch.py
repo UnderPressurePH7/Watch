@@ -19,7 +19,7 @@ except Exception:
 logger = logging.getLogger('Watch')
 logger.setLevel(logging.DEBUG if os.path.isfile('.debug_mods') else logging.INFO)
 
-__version__ = '0.2.9'
+__version__ = '0.3.0'
 __author__ = 'Under_Pressure'
 
 _GF_OK = True
@@ -972,6 +972,7 @@ if _GF_OK:
             self._readyCallbackID = None
             self._recoveryAttempts = 0
             self._lastStage = None
+            self._docWaits = 0
             self._lastFailure = None
             self._scaleBound = False
             self._parentUid = None
@@ -1083,6 +1084,9 @@ if _GF_OK:
         def _onCommand(self, name, value):
             if name == 'stage':
                 try:
+                    if self._lastStage is None and self._docWaits:
+                        logger.info('[Watch:%s] document started after >%.0fs',
+                                    self._name, self._docWaits * _VIEW_READY_TIMEOUT)
                     self._lastStage = unicode(value)
                     logger.info('[Watch:%s] stage=%s', self._name, self._lastStage)
                 except Exception:
@@ -1156,6 +1160,14 @@ if _GF_OK:
             if self._nativeReady:
                 logger.warning('[Watch:%s] %s, keeping default size %s',
                                self._name, self._failureReason(), self._viewSize)
+                return
+            if self._lastStage is None and self._isWindowUsable():
+                self._docWaits += 1
+                if self._docWaits == 1:
+                    logger.warning('[Watch:%s] document still pending after %.0fs, waiting',
+                                   self._name, _VIEW_READY_TIMEOUT)
+                self._readyCallbackID = BigWorld.callback(
+                    _VIEW_READY_TIMEOUT, lambda: self._onReadyTimeout(token))
                 return
             self._recoverWindow(self._failureReason())
 
@@ -1299,6 +1311,7 @@ if _GF_OK:
             self._nativeReady = False
             self._sizeConfirmed = False
             self._lastStage = None
+            self._docWaits = 0
             self._stableScale = None
             self._scaleSample = None
             self._parentUid = None
