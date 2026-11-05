@@ -14,7 +14,7 @@ on:
       version:
         description: 'Mod Version'
         required: true
-        default: '0.2.9'
+        default: '0.3.1'
       mod_id:
         description: 'Mod ID (e.g., me.author.modname)'
         required: true
@@ -30,7 +30,7 @@ on:
       game_version:
         description: 'World of Tanks version'
         required: true
-        default: '2.4.1.0'
+        default: '2.4.1.1'
 
 permissions:
   contents: write
@@ -48,6 +48,16 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
+    - name: Check for AS3 sources
+      id: check-as3
+      shell: pwsh
+      run: |
+        if (Test-Path as3 -PathType Container) {
+          "exists=true" >> $env:GITHUB_OUTPUT
+        } else {
+          "exists=false" >> $env:GITHUB_OUTPUT
+        }
+
     - name: Set up Python 3
       uses: actions/setup-python@v5
       with:
@@ -58,14 +68,14 @@ jobs:
         choco install python2 -y --no-progress
 
     - name: Install Java (required for Flex SDK)
-      if: inputs.build_swf == true || github.event_name == 'push'
+      if: steps.check-as3.outputs.exists == 'true' && (inputs.build_swf == true || github.event_name == 'push')
       uses: actions/setup-java@v4
       with:
         distribution: 'temurin'
         java-version: '11'
 
     - name: Cache Flex SDK
-      if: inputs.build_swf == true || github.event_name == 'push'
+      if: steps.check-as3.outputs.exists == 'true' && (inputs.build_swf == true || github.event_name == 'push')
       id: cache-flex
       uses: actions/cache@v4
       with:
@@ -73,7 +83,7 @@ jobs:
         key: flex-sdk-${{ env.FLEX_VERSION }}-v2
 
     - name: Download and Setup Apache Flex SDK
-      if: (inputs.build_swf == true || github.event_name == 'push') && steps.cache-flex.outputs.cache-hit != 'true'
+      if: steps.check-as3.outputs.exists == 'true' && (inputs.build_swf == true || github.event_name == 'push') && steps.cache-flex.outputs.cache-hit != 'true'
       shell: pwsh
       run: |
         Write-Host "Downloading Apache Flex SDK ${{ env.FLEX_VERSION }}..."
@@ -119,7 +129,7 @@ jobs:
         Write-Host "Flex SDK installed"
 
     - name: Setup playerglobal.swc
-      if: inputs.build_swf == true || github.event_name == 'push'
+      if: steps.check-as3.outputs.exists == 'true' && (inputs.build_swf == true || github.event_name == 'push')
       shell: pwsh
       run: |
         Write-Host "Setting up playerglobal.swc from project libs..."
@@ -173,7 +183,7 @@ jobs:
             $modId = "me.under_pressure.watch"
             $modName = "Watch"
             $modDescription = "Watch"
-            $gameVersion = "2.3.0.0"
+            $gameVersion = "2.4.1.1"
         }
         
         echo "PROJECT_VERSION=$version" >> $env:GITHUB_ENV
@@ -189,7 +199,7 @@ jobs:
         Write-Host "Game Version: $gameVersion"
 
     - name: Build SWF files
-      if: inputs.build_swf == true || github.event_name == 'push'
+      if: steps.check-as3.outputs.exists == 'true' && (inputs.build_swf == true || github.event_name == 'push')
       shell: pwsh
       run: |
         Write-Host "========================================" -ForegroundColor Cyan

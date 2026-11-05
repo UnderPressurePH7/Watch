@@ -41,11 +41,13 @@
     var resizeRetryCount = 0;
     var clockTimer = null;
     var started = false;
+    var clockRunning = false;
     var engineBound = false;
     var modelCallbackId = null;
     var modelPollTimer = null;
     var startupTimer = null;
     var modelWaitAttempts = 0;
+    var modelMissingReported = false;
     var lastStage = null;
     var disposed = false;
 
@@ -328,7 +330,7 @@
 
     function scheduleClock() {
         stopClock();
-        if (!started || hidden) {
+        if (!clockRunning || hidden) {
             return;
         }
         var period = cfg.showSeconds === false ? CLOCK_PERIOD_MIN : CLOCK_PERIOD_SEC;
@@ -475,6 +477,7 @@
     function teardown() {
         disposed = true;
         started = false;
+        clockRunning = false;
         if (startupTimer !== null) {
             window.clearTimeout(startupTimer);
             startupTimer = null;
@@ -493,6 +496,7 @@
             return;
         }
         started = true;
+        clockRunning = true;
         reportStage('init');
         bindEngine();
         applyAll();
@@ -525,9 +529,18 @@
             }
             return;
         }
+        if (!clockRunning) {
+            clockRunning = true;
+            renderClock();
+            scheduleClock();
+        }
         modelWaitAttempts += 1;
         if (modelWaitAttempts > MODEL_WAIT_ATTEMPTS) {
-            reportStage('model-missing');
+            if (!modelMissingReported) {
+                modelMissingReported = true;
+                reportStage('model-missing');
+            }
+            startupTimer = window.setTimeout(waitForModel, 1000);
             return;
         }
         startupTimer = window.setTimeout(waitForModel, 100);

@@ -148,7 +148,7 @@ def zip_folder(source: str, destination: str, mode: str = 'w', compression: int 
     """
     source_path = pathlib.Path(source)
     with zipfile.ZipFile(destination, mode, compression) as zipfh:
-        # Use a fixed timestamp for reproducible builds
+        # Use the current timestamp for archive entries
         now = tuple(datetime.datetime.now().timetuple())[:6]
         for file_path in source_path.rglob('*'):
             arcname = file_path.relative_to(source_path)

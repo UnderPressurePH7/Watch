@@ -17,9 +17,9 @@ except Exception:
     _CLIENT_LANG = 'en'
 
 logger = logging.getLogger('Watch')
-logger.setLevel(logging.DEBUG if os.path.isfile('.debug_mods') else logging.INFO)
+logger.setLevel(logging.DEBUG if os.path.isfile('.debug_mods') else logging.ERROR)
 
-__version__ = '0.3.0'
+__version__ = '0.3.1'
 __author__ = 'Under_Pressure'
 
 _GF_OK = True
@@ -32,7 +32,6 @@ try:
     from gui.impl.gui_decorators import args2params
     from helpers import dependency
     from skeletons.gui.impl import IGuiLoader
-    # Declared natively in res/gui/gen_resources/me.under_pressure.watch.json (WoT 2.4.1+)
     _LAYOUTS = {
         'WatchBattle': R.mods.under_pressure.watch.views.WatchBattle,
         'WatchGarage': R.mods.under_pressure.watch.views.WatchGarage,
@@ -121,18 +120,13 @@ _DRAG_TICK_SLEEP = 0.35
 _DRAG_IDLE_GRACE = 4
 _DRAG_NEAR_PAD = 200
 
-_LOAD_SETTLE_FRAMES = 2
+_LOAD_SETTLE_FRAMES = 3
 _LOAD_RETRY_LIMIT = 600
 _LOAD_RETRY_DELAY = 0.1
 _LOAD_SETTLE_HOLD = 0.1
-_VIEW_READY_TIMEOUT = 30.0
+_HANGAR_SPACE_WAIT_RETRIES = 200
+_VIEW_READY_REPORT = 30.0
 _VIEW_RECOVERY_LIMIT = 2
-
-_GARAGE_SETTLE_DELAY = 0.35
-_GARAGE_SETTLE_RETRY = 0.35
-_GARAGE_SETTLE_MAX_WAITS = 60
-_GARAGE_SETTLE_FRAMES = 3
-_GARAGE_SETTLE_HOLD = 0.1
 
 _BATTLE_NAME = 'WatchBattle'
 _GARAGE_NAME = 'WatchGarage'
@@ -201,14 +195,12 @@ def _importClass(classPath):
 
 
 def _isHangarState(state):
-    try:
-        from gui.lobby_state_machine.states import isInHangarState
-        if isInHangarState():
-            return True
-    except Exception:
-        pass
     if state is None:
-        return False
+        try:
+            from gui.lobby_state_machine.states import isInHangarState
+            return bool(isInHangarState())
+        except Exception:
+            return False
     try:
         from gui.lobby_state_machine.states import LobbyStateFlags
         if state.getFlags() & LobbyStateFlags.HANGAR:
@@ -255,27 +247,31 @@ def _isHangarSpaceReady():
     except Exception:
         return True
 
-def _hangarSettleBlocker():
-    if not _isHangarSpaceReady():
-        return 'space'
+def _mainWindow():
     try:
-        manager = dependency.instance(IGuiLoader).windowsManager
-        main = manager.getMainWindow()
+        return dependency.instance(IGuiLoader).windowsManager.getMainWindow()
     except Exception:
-        return 'manager'
+        return None
+
+
+def _hostBlocker(mode):
+    """Single readiness gate for creating an overlay; returns the blocking reason or None."""
+    if _isHostAppInitialized(mode) is False:
+        return 'app'
+    if _isSpaceEntered(mode) is False:
+        return 'guiSpace=%s' % (_guiSpaceID(),)
+    main = _mainWindow()
     if main is None or getattr(main, 'proxy', None) is None:
         return 'mainWindow'
     try:
-        status = getattr(main, 'windowStatus', None)
+        status = main.windowStatus
     except Exception:
         status = None
     if status != WindowStatus.LOADED:
         return 'mainStatus=%s' % (status,)
+    if mode == 'garage' and not _isHangarSpaceReady():
+        return 'hangarSpace'
     return None
-
-
-def _isHangarSettled():
-    return _hangarSettleBlocker() is None
 
 
 def _isHostAppInitialized(mode):
@@ -343,7 +339,12 @@ def _tr(key, default=u''):
 def _toBool(value):
     if isinstance(value, bool):
         return value
-    return str(value).lower() == 'true'
+    if isinstance(value, (int, long)):
+        return value != 0
+    try:
+        return str(value).strip().lower() in ('1', 'true', 'yes', 'on')
+    except Exception:
+        return False
 
 
 def _clamp(minVal, val, maxVal):
@@ -451,8 +452,22 @@ def _saveJsonFile(path, data, encoding):
     raw = text.encode('utf-8')
     if encoding == _CONFIG_ENCODING_UTF8_BOM:
         raw = _UTF8_BOM + raw
-    with open(path, 'wb') as f:
-        f.write(raw)
+    tempPath = path + '.tmp'
+    try:
+        with open(tempPath, 'wb') as f:
+            f.write(raw)
+            f.flush()
+            os.fsync(f.fileno())
+        if os.path.exists(path):
+            os.remove(path)
+        os.rename(tempPath, path)
+    except Exception:
+        try:
+            if os.path.exists(tempPath):
+                os.remove(tempPath)
+        except Exception:
+            pass
+        raise
 
 
 _screenResolutionCache = None
@@ -693,7 +708,10 @@ class _Config(object):
             return (True, offset, _anchorFromSignedOffset(offset), False)
         if scheme == _ANCHOR_SCHEME_SIGNED:
             return (True, offset, _anchorFromSignedOffset(offset), False)
-        return (True, offset, _anchorFromSignedOffset(offset), True)
+        # Legacy offsets are converted at runtime once the view size is known
+        # (_convertLegacyOffset); until then they are saved back as legacy.
+        # Only an implicit scheme (old file without the key) needs a re-save.
+        return (prefix + '-anchor-scheme' not in data, offset, _anchorFromSignedOffset(offset), True)
 
     def _applyData(self, data):
         if not isinstance(data, dict):
@@ -969,15 +987,14 @@ if _GF_OK:
             self._resizeCallbackID = None
             self._sizeSyncCallbackID = None
             self._loadCallbackID = None
-            self._readyCallbackID = None
+            self._reportCallbackID = None
             self._recoveryAttempts = 0
+            self._loadRetryLogged = False
             self._lastStage = None
-            self._docWaits = 0
-            self._lastFailure = None
+            self._readyLate = False
             self._scaleBound = False
             self._parentUid = None
             self._settleFrames = 0
-            self.parentGate = None
 
         def layoutID(self):
             return self._layout()
@@ -997,7 +1014,7 @@ if _GF_OK:
                 return
             self._active = True
             self._recoveryAttempts = 0
-            self._lastFailure = None
+            self._loadRetryLogged = False
             self._visible = True
             self._loadPosition()
             self._bindScaleListener()
@@ -1073,7 +1090,7 @@ if _GF_OK:
 
         def _onReady(self, *args):
             self._nativeReady = True
-            self._lastFailure = None
+            self._recoveryAttempts = 0
             self._checkReady()
             self.publish()
             self._syncPosition()
@@ -1084,9 +1101,9 @@ if _GF_OK:
         def _onCommand(self, name, value):
             if name == 'stage':
                 try:
-                    if self._lastStage is None and self._docWaits:
+                    if self._lastStage is None and self._readyLate:
                         logger.info('[Watch:%s] document started after >%.0fs',
-                                    self._name, self._docWaits * _VIEW_READY_TIMEOUT)
+                                    self._name, _VIEW_READY_REPORT)
                     self._lastStage = unicode(value)
                     logger.info('[Watch:%s] stage=%s', self._name, self._lastStage)
                 except Exception:
@@ -1130,15 +1147,16 @@ if _GF_OK:
 
         def _checkReady(self):
             if self._nativeReady and self._sizeConfirmed:
-                _cancelCallbackSafe(self._readyCallbackID)
-                self._readyCallbackID = None
+                self._recoveryAttempts = 0
+                _cancelCallbackSafe(self._reportCallbackID)
+                self._reportCallbackID = None
 
-        def _failureReason(self):
+        def _readinessState(self):
             stage = self._lastStage
             native = self._nativeReady
             size = self._sizeConfirmed
             if stage is None:
-                label = 'DOC_NOT_LOADED'
+                label = 'DOC_PENDING'
             elif stage in ('script', 'dom'):
                 label = 'JS_NOT_READY'
             elif stage == 'model-missing':
@@ -1151,36 +1169,19 @@ if _GF_OK:
                 label = 'VIEW_NOT_READY'
             return '%s (stage=%s, native=%s, size=%s)' % (label, stage, native, size)
 
-        def _onReadyTimeout(self, token):
+        def _onReadyReport(self, token):
             if token != self._token:
                 return
-            self._readyCallbackID = None
+            self._reportCallbackID = None
             if self._nativeReady and self._sizeConfirmed:
                 return
-            if self._nativeReady:
-                logger.warning('[Watch:%s] %s, keeping default size %s',
-                               self._name, self._failureReason(), self._viewSize)
-                return
-            if self._lastStage is None and self._isWindowUsable():
-                self._docWaits += 1
-                if self._docWaits == 1:
-                    logger.warning('[Watch:%s] document still pending after %.0fs, waiting',
-                                   self._name, _VIEW_READY_TIMEOUT)
-                self._readyCallbackID = BigWorld.callback(
-                    _VIEW_READY_TIMEOUT, lambda: self._onReadyTimeout(token))
-                return
-            self._recoverWindow(self._failureReason())
+            self._readyLate = True
+            logger.warning('[Watch:%s] not ready after %.0fs, still waiting: %s',
+                           self._name, _VIEW_READY_REPORT, self._readinessState())
 
         def _recoverWindow(self, reason):
-            signature = (reason, self._lastStage)
-            repeated = self._lastFailure is not None and self._lastFailure == signature
-            self._lastFailure = signature
             self._dropWindow()
             if not self._active or self._destroyed:
-                return
-            if repeated:
-                logger.error('[Watch:%s] recovery stopped, identical failure repeated: %s',
-                             self._name, reason)
                 return
             if self._recoveryAttempts >= _VIEW_RECOVERY_LIMIT:
                 logger.error('[Watch:%s] recovery abandoned: %s', self._name, reason)
@@ -1190,22 +1191,22 @@ if _GF_OK:
                          self._recoveryAttempts, _VIEW_RECOVERY_LIMIT, reason)
             self._loadCallbackID = BigWorld.callback(_LOAD_RETRY_DELAY, self._ensureWindow)
 
+        def _retryLoad(self, token, retry, reason, slow=False):
+            if token != self._token or self._destroyed or self._window is not None:
+                return
+            if retry >= _LOAD_RETRY_LIMIT and not self._loadRetryLogged:
+                self._loadRetryLogged = True
+                logger.error('[Watch:%s] load still unavailable after %d retries: %s',
+                             self._name, retry, reason)
+            delay = 5.0 if slow or retry >= _LOAD_RETRY_LIMIT else _LOAD_RETRY_DELAY
+            self._loadCallbackID = BigWorld.callback(
+                delay, lambda: self._load(token, retry + 1))
+
         def _onViewFinalized(self, token=None):
             logger.debug('[Watch:%s] view finalized token=%s current=%s', self._name, token, self._token)
             if token is not None and token != self._token:
                 return
-            self._unbindGuiResetter()
-            _cancelCallbackSafe(self._sizeSyncCallbackID)
-            self._sizeSyncCallbackID = None
             self._window = None
-            self._model = None
-            self._nativeReady = False
-            self._sizeConfirmed = False
-            self._stableScale = None
-            self._scaleSample = None
-            self._parentUid = None
-            self._token += 1
-            self._stopDragTicker()
             self._recoverWindow('view finalized while active')
 
         def _isWindowUsable(self):
@@ -1218,19 +1219,28 @@ if _GF_OK:
             except Exception:
                 return False
 
+        def _staleReason(self):
+            try:
+                status = self._window.windowStatus
+            except Exception:
+                status = None
+            if status in _WINDOW_DEAD_STATUSES:
+                return 'window %s' % (status,)
+            if self._parentUid is None:
+                return None
+            currentUid = getattr(_mainWindow(), 'uniqueID', None)
+            if currentUid is not None and currentUid != self._parentUid:
+                return 'parent %s->%s' % (self._parentUid, currentUid)
+            return None
+
         def _ensureWindow(self):
             if self._destroyed:
                 return
             if self._window is not None:
-                if self._parentUid is None:
+                reason = self._staleReason()
+                if reason is None:
                     return
-                try:
-                    current = dependency.instance(IGuiLoader).windowsManager.getMainWindow()
-                except Exception:
-                    current = None
-                currentUid = getattr(current, 'uniqueID', None)
-                if current is None or currentUid is None or currentUid == self._parentUid:
-                    return
+                logger.debug('[Watch:%s] replacing stale window: %s', self._name, reason)
                 self._dropWindow()
             _cancelCallbackSafe(self._loadCallbackID)
             self._loadCallbackID = None
@@ -1241,52 +1251,33 @@ if _GF_OK:
             self._settleFrames = _LOAD_SETTLE_FRAMES
             self._load(self._token)
 
-        def _retryLoad(self, token, retry, reason):
-            if retry >= _LOAD_RETRY_LIMIT:
-                logger.error('[Watch:%s] load abandoned after %d retries: %s', self._name, retry, reason)
-                return
-            self._loadCallbackID = BigWorld.callback(_LOAD_RETRY_DELAY, lambda: self._load(token, retry + 1))
-
         def _load(self, token, retry=0):
             self._loadCallbackID = None
             if token != self._token or self._destroyed or self._window is not None:
                 return
-            appReady = _isHostAppInitialized(self._mode)
-            if appReady is False:
-                self._retryLoad(token, retry, 'host app not initialized')
+            blocker = _hostBlocker(self._mode)
+            if blocker == 'hangarSpace' and retry >= _HANGAR_SPACE_WAIT_RETRIES:
+                if retry == _HANGAR_SPACE_WAIT_RETRIES:
+                    logger.error('[Watch:%s] hangar space not ready after %.0fs, creating anyway',
+                                 self._name, retry * _LOAD_RETRY_DELAY)
+                blocker = None
+            if blocker is not None:
+                self._retryLoad(token, retry, blocker)
                 return
-            if _isSpaceEntered(self._mode) is False:
-                self._retryLoad(token, retry, 'SPACE_NOT_READY (spaceID=%s)' % (_guiSpaceID(),))
-                return
-            try:
-                parent = dependency.instance(IGuiLoader).windowsManager.getMainWindow()
-            except Exception:
-                parent = None
-            if parent is None or parent.proxy is None or parent.windowStatus != WindowStatus.LOADED:
-                self._retryLoad(token, retry, 'main window not loaded')
-                return
-            if self.parentGate is not None:
-                try:
-                    allowed = bool(self.parentGate(parent))
-                except Exception:
-                    logger.exception('[Watch:%s] parent gate failed', self._name)
-                    allowed = False
-                if not allowed:
-                    self._retryLoad(token, retry, 'parent gate closed')
-                    return
             if self._settleFrames > 0:
                 self._settleFrames -= 1
-                self._loadCallbackID = BigWorld.callback(_LOAD_SETTLE_HOLD, lambda: self._load(token, retry))
+                self._loadCallbackID = BigWorld.callback(_LOAD_SETTLE_HOLD, lambda: self._load(token, retry + 1))
                 return
+            parent = _mainWindow()
             try:
-                logger.debug('[Watch:%s] create parent=%s retry=%d appReady=%s', self._name,
-                             getattr(parent, 'uniqueID', None), retry, appReady)
+                logger.debug('[Watch:%s] create parent=%s retry=%d', self._name,
+                             getattr(parent, 'uniqueID', None), retry)
                 self._parentUid = getattr(parent, 'uniqueID', None)
                 self._window = _ClockWindow(_ClockView(self), parent, self._name, self._windowLayer())
                 self._window.load()
                 if not (self._nativeReady and self._sizeConfirmed):
-                    self._readyCallbackID = BigWorld.callback(
-                        _VIEW_READY_TIMEOUT, lambda: self._onReadyTimeout(token))
+                    self._reportCallbackID = BigWorld.callback(
+                        _VIEW_READY_REPORT, lambda: self._onReadyReport(token))
             except Exception:
                 logger.exception('[Watch] Failed to load overlay %s', self._name)
                 window = self._window
@@ -1294,12 +1285,12 @@ if _GF_OK:
                 self._model = None
                 self._parentUid = None
                 _destroyWindowSafe(window)
-                return
+                self._retryLoad(token, retry, 'window creation failed', slow=True)
 
         def _dropWindow(self):
             self._unbindGuiResetter()
-            _cancelCallbackSafe(self._readyCallbackID)
-            self._readyCallbackID = None
+            _cancelCallbackSafe(self._reportCallbackID)
+            self._reportCallbackID = None
             _cancelCallbackSafe(self._sizeSyncCallbackID)
             self._sizeSyncCallbackID = None
             _cancelCallbackSafe(self._loadCallbackID)
@@ -1311,7 +1302,7 @@ if _GF_OK:
             self._nativeReady = False
             self._sizeConfirmed = False
             self._lastStage = None
-            self._docWaits = 0
+            self._readyLate = False
             self._stableScale = None
             self._scaleSample = None
             self._parentUid = None
@@ -1730,12 +1721,12 @@ class _BattleClock(object):
         self._guiBound = False
         self._configBound = False
         self._hiddenByUI = False
-        self._hiddenByStats = False
+        self._hiddenByStats = set()
 
     def onBattlePageReady(self):
         self._pageReady = True
         self._hiddenByUI = False
-        self._hiddenByStats = False
+        self._hiddenByStats.clear()
         self._bindGUI()
         self._bindConfig()
         if not (g_configParams.enabled.value and g_configParams.battleEnabled.value):
@@ -1781,9 +1772,9 @@ class _BattleClock(object):
         self._guiBound = True
         try:
             g_eventBus.addListener(GameEvent.GUI_VISIBILITY, self._onGUIVisibility, scope=EVENT_BUS_SCOPE.BATTLE)
-            g_eventBus.addListener(GameEvent.FULL_STATS, self._onToggleStats, scope=EVENT_BUS_SCOPE.BATTLE)
-            g_eventBus.addListener(GameEvent.FULL_STATS_QUEST_PROGRESS, self._onToggleStats, scope=EVENT_BUS_SCOPE.BATTLE)
-            g_eventBus.addListener(GameEvent.FULL_STATS_PERSONAL_RESERVES, self._onToggleStats, scope=EVENT_BUS_SCOPE.BATTLE)
+            g_eventBus.addListener(GameEvent.FULL_STATS, self._onFullStats, scope=EVENT_BUS_SCOPE.BATTLE)
+            g_eventBus.addListener(GameEvent.FULL_STATS_QUEST_PROGRESS, self._onQuestProgress, scope=EVENT_BUS_SCOPE.BATTLE)
+            g_eventBus.addListener(GameEvent.FULL_STATS_PERSONAL_RESERVES, self._onPersonalReserves, scope=EVENT_BUS_SCOPE.BATTLE)
         except Exception:
             pass
 
@@ -1793,9 +1784,9 @@ class _BattleClock(object):
         self._guiBound = False
         try:
             g_eventBus.removeListener(GameEvent.GUI_VISIBILITY, self._onGUIVisibility, scope=EVENT_BUS_SCOPE.BATTLE)
-            g_eventBus.removeListener(GameEvent.FULL_STATS, self._onToggleStats, scope=EVENT_BUS_SCOPE.BATTLE)
-            g_eventBus.removeListener(GameEvent.FULL_STATS_QUEST_PROGRESS, self._onToggleStats, scope=EVENT_BUS_SCOPE.BATTLE)
-            g_eventBus.removeListener(GameEvent.FULL_STATS_PERSONAL_RESERVES, self._onToggleStats, scope=EVENT_BUS_SCOPE.BATTLE)
+            g_eventBus.removeListener(GameEvent.FULL_STATS, self._onFullStats, scope=EVENT_BUS_SCOPE.BATTLE)
+            g_eventBus.removeListener(GameEvent.FULL_STATS_QUEST_PROGRESS, self._onQuestProgress, scope=EVENT_BUS_SCOPE.BATTLE)
+            g_eventBus.removeListener(GameEvent.FULL_STATS_PERSONAL_RESERVES, self._onPersonalReserves, scope=EVENT_BUS_SCOPE.BATTLE)
         except Exception:
             pass
 
@@ -1805,10 +1796,23 @@ class _BattleClock(object):
             self._hiddenByUI = hidden
             self._overlay.setVisible(self._isVisible())
 
-    def _onToggleStats(self, event):
+    def _onFullStats(self, event):
+        self._onToggleStats(event, 'fullStats')
+
+    def _onQuestProgress(self, event):
+        self._onToggleStats(event, 'questProgress')
+
+    def _onPersonalReserves(self, event):
+        self._onToggleStats(event, 'personalReserves')
+
+    def _onToggleStats(self, event, source):
         hidden = event.ctx.get('isDown', False)
-        if hidden != self._hiddenByStats:
-            self._hiddenByStats = hidden
+        wasHidden = source in self._hiddenByStats
+        if hidden != wasHidden:
+            if hidden:
+                self._hiddenByStats.add(source)
+            else:
+                self._hiddenByStats.discard(source)
             self._overlay.setVisible(self._isVisible())
 
     def _isVisible(self):
@@ -1824,13 +1828,7 @@ class _GarageClock(object):
         self._smCallbackID = None
         self._isGarage = False
         self._configBound = False
-        self._settleCbId = None
-        self._frameCbId = None
-        self._settleWaits = 0
-        self._settleFrames = 0
-        self._ensureReason = None
         self._hangarSpaceBound = False
-        self._gateBound = False
         self._lobbyBound = False
         self._hiddenByLobby = False
 
@@ -1849,15 +1847,11 @@ class _GarageClock(object):
         if not self._configBound:
             self._configBound = True
             g_config.onConfigChanged += self._onConfigChanged
-        if not self._gateBound and hasattr(self._overlay, 'parentGate'):
-            self._gateBound = True
-            self._overlay.parentGate = self._isParentReady
         self._bindHangarSpace()
         self._bindLobby()
         self._onVisibleRouteChanged(getattr(stateMachine, 'visibleRouteInfo', None))
 
     def unbind(self):
-        self._cancelSettle()
         self._unbindHangarSpace()
         self._unbindLobby()
         if self._smCallbackID is not None:
@@ -1888,27 +1882,11 @@ class _GarageClock(object):
         state = getattr(routeInfo, 'state', None)
         self._isGarage = self._checkGarageState(state)
         if self._shouldShow():
-            self._requestEnsure('route')
+            self._show()
         else:
-            self._cancelSettle()
             self._overlay.disable()
 
     def _checkGarageState(self, state):
-        if state is None:
-            return False
-        sm = self._stateMachine
-        if sm is not None and (DefaultHangarState is not None or LegacyHangarState is not None):
-            try:
-                targets = []
-                if DefaultHangarState is not None:
-                    targets.append(sm.getStateByCls(DefaultHangarState))
-                if LegacyHangarState is not None:
-                    targets.append(sm.getStateByCls(LegacyHangarState))
-                targets = [target for target in targets if target is not None]
-                if state in targets:
-                    return True
-            except Exception:
-                pass
         return _isHangarState(state)
 
     def _onConfigChanged(self):
@@ -1924,83 +1902,7 @@ class _GarageClock(object):
             logger.exception('[Watch] garage visibility check failed')
             return False
 
-    def _isParentReady(self, parent):
-        if not _isHangarSpaceReady():
-            return False
-        try:
-            return parent.windowStatus == WindowStatus.LOADED
-        except Exception:
-            return False
-
-    def _requestEnsure(self, reason):
-        self._ensureReason = reason
-        self._settleWaits = 0
-        self._scheduleSettle(_GARAGE_SETTLE_DELAY)
-
-    def _scheduleSettle(self, delay):
-        _cancelCallbackSafe(self._settleCbId)
-        self._settleCbId = None
-        _cancelCallbackSafe(self._frameCbId)
-        self._frameCbId = None
-        try:
-            self._settleCbId = BigWorld.callback(delay, self._settleTick)
-        except Exception:
-            logger.exception('[Watch] failed to schedule garage settle')
-
-    def _cancelSettle(self):
-        _cancelCallbackSafe(self._settleCbId)
-        self._settleCbId = None
-        _cancelCallbackSafe(self._frameCbId)
-        self._frameCbId = None
-        self._settleWaits = 0
-        self._settleFrames = 0
-
-    def _retrySettle(self):
-        self._settleWaits += 1
-        if self._settleWaits > _GARAGE_SETTLE_MAX_WAITS:
-            elapsed = _GARAGE_SETTLE_MAX_WAITS * _GARAGE_SETTLE_RETRY
-            logger.error('[Watch] garage settle budget exhausted after %.1fs, request=%s, '
-                         'blocker=%s; creating overlay in degraded mode',
-                         elapsed, self._ensureReason, _hangarSettleBlocker())
-            self._commitEnsure()
-            return False
-        self._scheduleSettle(_GARAGE_SETTLE_RETRY)
-        return True
-
-    def _settleTick(self):
-        self._settleCbId = None
-        try:
-            if not self._shouldShow():
-                return
-            if not _isHangarSettled():
-                self._retrySettle()
-                return
-            self._settleFrames = _GARAGE_SETTLE_FRAMES
-            self._frameTick()
-        except Exception:
-            logger.exception('[Watch] garage settle tick failed')
-
-    def _frameTick(self):
-        self._frameCbId = None
-        try:
-            if not self._shouldShow():
-                return
-            if self._settleFrames > 0:
-                self._settleFrames -= 1
-                self._frameCbId = BigWorld.callback(_GARAGE_SETTLE_HOLD, self._frameTick)
-                return
-            if not _isHangarSettled():
-                logger.debug('[Watch] hangar unsettled at commit, waits=%d', self._settleWaits)
-                self._retrySettle()
-                return
-            self._commitEnsure()
-        except Exception:
-            logger.exception('[Watch] garage frame tick failed')
-
-    def _commitEnsure(self):
-        if not self._shouldShow():
-            return
-        self._settleWaits = 0
+    def _show(self):
         self._overlay.enable()
         self._overlay.setVisible(not self._hiddenByLobby)
 
@@ -2068,14 +1970,13 @@ class _GarageClock(object):
 
     def _onHangarSpaceCreate(self, *_):
         try:
-            if self._isGarage:
-                self._requestEnsure('space')
+            if self._shouldShow():
+                self._show()
         except Exception:
             logger.exception('[Watch] hangar space create handler failed')
 
     def _onHangarSpaceDestroy(self, *_):
         try:
-            self._cancelSettle()
             self._overlay.disable()
         except Exception:
             logger.exception('[Watch] hangar space destroy handler failed')
@@ -2179,6 +2080,7 @@ class _WatchMod(object):
 
     def _onAccountBecomeNonPlayer(self):
         self._battleClock.onBattlePageDisposed()
+        self._garageClock.disable()
 
     def _onDisconnected(self):
         self._garageClock.disable()
