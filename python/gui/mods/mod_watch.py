@@ -19,7 +19,7 @@ except Exception:
 logger = logging.getLogger('Watch')
 logger.setLevel(logging.DEBUG if os.path.isfile('.debug_mods') else logging.ERROR)
 
-__version__ = '0.3.1'
+__version__ = '0.3.2'
 __author__ = 'Under_Pressure'
 
 _GF_OK = True
@@ -655,6 +655,7 @@ class _Config(object):
         self.legacyGarage = False
         self._configEncoding = _CONFIG_ENCODING_UTF8
         self._configWritable = True
+        self._configLost = False
         try:
             self._loadConfig()
         except Exception:
@@ -708,9 +709,6 @@ class _Config(object):
             return (True, offset, _anchorFromSignedOffset(offset), False)
         if scheme == _ANCHOR_SCHEME_SIGNED:
             return (True, offset, _anchorFromSignedOffset(offset), False)
-        # Legacy offsets are converted at runtime once the view size is known
-        # (_convertLegacyOffset); until then they are saved back as legacy.
-        # Only an implicit scheme (old file without the key) needs a re-save.
         return (prefix + '-anchor-scheme' not in data, offset, _anchorFromSignedOffset(offset), True)
 
     def _applyData(self, data):
@@ -742,17 +740,26 @@ class _Config(object):
     def _loadConfig(self):
         data = {}
         existed = os.path.isfile(_CONFIG_PATH)
+        tempPath = _CONFIG_PATH + '.tmp'
+        if not existed and os.path.isfile(tempPath):
+            try:
+                os.rename(tempPath, _CONFIG_PATH)
+                existed = True
+            except Exception as e:
+                logger.error('[Config] Cannot restore %s from %s: %s', _CONFIG_PATH, tempPath, e)
         if existed:
             try:
                 data, self._configEncoding = _loadJsonFile(_CONFIG_PATH)
+                if not isinstance(data, dict):
+                    raise ValueError('config root must be an object')
             except Exception as e:
-                logger.error('[Config] Cannot read %s; file preserved, defaults used: %s', _CONFIG_PATH, e)
-                self._configWritable = False
-                return
-            if not isinstance(data, dict):
-                logger.error('[Config] %s must contain an object; file preserved', _CONFIG_PATH)
-                self._configWritable = False
-                return
+                logger.error('[Config] Cannot read %s: %s', _CONFIG_PATH, e)
+                if not self._quarantineConfig():
+                    self._configWritable = False
+                    return
+                data = {}
+                existed = False
+                self._configLost = True
         try:
             repaired = self._applyData(data)
         except Exception:
@@ -760,6 +767,18 @@ class _Config(object):
             repaired = True
         if not existed or repaired:
             self._saveConfig()
+
+    def _quarantineConfig(self):
+        badPath = _CONFIG_PATH + '.bad'
+        try:
+            if os.path.exists(badPath):
+                os.remove(badPath)
+            os.rename(_CONFIG_PATH, badPath)
+        except Exception as e:
+            logger.error('[Config] Cannot move %s aside; file preserved, saving disabled: %s', _CONFIG_PATH, e)
+            return False
+        logger.error('[Config] Unreadable config kept as %s, a fresh one is written', badPath)
+        return True
 
     def _saveConfig(self):
         if not self._configWritable:
@@ -818,6 +837,9 @@ class _Config(object):
                 ]
             }
             settings = g_modsSettingsApi.setModTemplate(MOD_LINKAGE, template, self._onSettingsChanged)
+            if self._configLost and isinstance(settings, dict):
+                # The file was unreadable, so MSA holds the last known settings: keep them.
+                self._applyMsa(settings)
             current = dict((name, param.msaValue) for name, param in g_configParams.items().items())
             if settings != current:
                 g_modsSettingsApi.updateModSettings(MOD_LINKAGE, current)
@@ -1108,6 +1130,8 @@ if _GF_OK:
                     logger.info('[Watch:%s] stage=%s', self._name, self._lastStage)
                 except Exception:
                     pass
+                if self._lastStage == 'init-failed':
+                    self._recoverWindow('JS init failed')
                 return
             if name == 'onSize':
                 try:
@@ -1837,8 +1861,9 @@ class _GarageClock(object):
         self._smCallbackID = None
         stateMachine = getLobbyStateMachine()
         if stateMachine is None:
-            if retry < 100:
-                self._smCallbackID = BigWorld.callback(0.1, lambda: self.bind(retry + 1))
+            if retry == 100:
+                logger.error('[Watch] lobby state machine unavailable after %d retries, still waiting', retry)
+            self._smCallbackID = BigWorld.callback(0.1 if retry < 100 else 3.0, lambda: self.bind(retry + 1))
             return
         if self._stateMachine is not stateMachine:
             self.unbind()

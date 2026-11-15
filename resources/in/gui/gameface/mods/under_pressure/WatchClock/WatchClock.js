@@ -335,10 +335,7 @@
         }
         var period = cfg.showSeconds === false ? CLOCK_PERIOD_MIN : CLOCK_PERIOD_SEC;
         var now = Date.now ? Date.now() : new Date().getTime();
-        var delay = period - (now % period);
-        if (delay < CLOCK_GUARD) {
-            delay += period;
-        }
+        var delay = period - (now % period) + CLOCK_GUARD;
         clockTimer = window.setTimeout(onClockTimer, delay);
     }
 
